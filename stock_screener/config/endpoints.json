@@ -1,0 +1,12 @@
+{
+    "DART": {
+        "base_url": "https://opendart.fss.or.kr/api",
+        "timeout": 10,
+        "max_retries": 3
+    },
+    "KRX": {
+        "base_url": "https://openapi.krx.co.kr/api",
+        "timeout": 15,
+        "max_retries": 3
+    }
+}
