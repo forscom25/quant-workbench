@@ -1,0 +1,17 @@
+# 1. 데이터 수집 & API
+finance-datareader
+OpenDartReader
+pykrx
+python-dotenv
+
+# 2. 데이터 처리 & 연산
+pandas
+numpy
+scipy
+
+# 3. 시각화 & 유틸리티
+matplotlib
+seaborn
+plotly
+tabulate
+tqdm

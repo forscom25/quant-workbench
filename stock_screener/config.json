@@ -1,0 +1,10 @@
+{
+    "api_keys": {
+        "dart_api_key": "ec7dc46d78a6f325243246f9459d83cd6a95f222",
+        "krx_auth_key": "내 KRX 키 값"
+    },
+    "strategy_params": {
+        "market": "KOSPI",
+        "top_n_mcap": 10
+    }
+}
