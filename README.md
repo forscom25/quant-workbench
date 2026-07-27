@@ -39,9 +39,11 @@ DART_API_KEY=your_api_key_here
 ## 🔄 교대 작업 루틴
 
 1. 작업 시작 전 (최신 코드 당겨오기)
+   ```bash
    git pull
 
 2. 작업 완료 및 컴퓨터 이동 시 (변경사항 업로드)
+   ```bash
    git add .
    git commit -m "feat: 변경 내용 요약 작성"
    git push

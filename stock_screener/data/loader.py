@@ -109,7 +109,7 @@ class QuantDataLoader:
         names = {t: stock.get_market_ticker_name(t) for t in df['ticker'].unique()}
         df['name'] = df['ticker'].map(names)
         
-        fdr_df = fdr.StockListing('KOSPI')[['Code', 'Sector']]
+        fdr_df = fdr.StockListing('KRX-DESC')[['Code', 'industry']]
         fdr_df.columns = ['ticker', 'sector']
         
         df = pd.merge(df, fdr_df, on='ticker', how='left')
@@ -131,16 +131,18 @@ class QuantDataLoader:
             
         return df
 
-    def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011') -> Optional[pd.DataFrame]:
+    def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011', fs_div: str = 'CFS') -> Optional[pd.DataFrame]:
         """재시도(Retry) 및 캐시 무효화가 적용된 DART 데이터 로더"""
-        cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}.csv"
+        # 캐시 파일명에 fs_div 추가 (CFS, OFS 구분)
+        cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.csv"
         
         if self.use_cache and self._is_cache_valid(cache_file):
             return pd.read_csv(cache_file)
 
         for attempt in range(self.dart_retries):
             try:
-                fs_df = self.dart.finstate_all(ticker, year, reprt_code=report_code)
+                # API 호출 시 fs_div 파라미터 전달
+                fs_df = self.dart.finstate_all(ticker, year, reprt_code=report_code, fs_div=fs_div)
                 if fs_df is not None and not fs_df.empty:
                     if self.use_cache:
                         fs_df.to_csv(cache_file, index=False, encoding='utf-8-sig')
@@ -148,32 +150,25 @@ class QuantDataLoader:
                 break  # 정상 응답이나 데이터가 없는 경우
             except Exception as e:
                 if attempt == self.dart_retries - 1:
-                    warnings.warn(f"[DART API 최종 실패] {ticker}: {e}")
+                    warnings.warn(f"[DART API 최종 실패] {ticker} ({fs_div}): {e}")
                     return None
                 time.sleep(1) # Rate limit 방어
         return None
 
     def parse_standardized_financials(self, ticker: str, year: int, report_code: str = '11011') -> Dict[str, float]:
-        """
-        [CFS/OFS 분리 및 sj_div 필터 적용]
-        연결재무제표(CFS)를 우선 탐색하고, 없을 경우 별도재무제표(OFS)로 폴백합니다.
-        (주의: 1, 3분기 누적 데이터는 Stage 3 계산 로직에서 차분 처리 필요)
-        """
-        fs_df = self.get_financial_statements(ticker, year, report_code)
         standard_metrics = {key: float('nan') for key in self.ACCOUNT_MAPPING.keys()}
+
+        # 1. 연결재무제표(CFS) 우선 요청
+        target_df = self.get_financial_statements(ticker, year, report_code, fs_div='CFS')
         
-        if fs_df is None or fs_df.empty or 'thstrm_amount' not in fs_df.columns:
+        # 2. 연결재무제표가 없거나 비어있으면 별도재무제표(OFS) 요청
+        if target_df is None or target_df.empty:
+            target_df = self.get_financial_statements(ticker, year, report_code, fs_div='OFS')
+
+        if target_df is None or target_df.empty or 'thstrm_amount' not in target_df.columns:
             return standard_metrics
 
-        # 1. 연결(CFS) / 별도(OFS) 분리 및 폴백
-        target_df = fs_df[fs_df['fs_div'] == 'CFS']
-        if target_df.empty:
-            target_df = fs_df[fs_df['fs_div'] == 'OFS']
-            
-        if target_df.empty:
-            return standard_metrics
-
-        # 2. 재무제표 종류(sj_div) 및 계정 매핑
+        # 3. 재무제표 종류(sj_div) 및 계정 매핑
         for standard_key, rules in self.ACCOUNT_MAPPING.items():
             # sj_div (BS: 재무상태표, IS: 손익계산서, CF: 현금흐름표) 필터링
             sj_filtered = target_df[target_df['sj_div'].str.contains(rules["sj"], na=False)]
@@ -181,11 +176,18 @@ class QuantDataLoader:
             for _, row in sj_filtered.iterrows():
                 acc_id = str(row.get('account_id', '')).strip()
                 acc_nm = str(row.get('account_nm', '')).strip()
-                amount_str = str(row.get('thstrm_amount', '')).replace(',', '')
                 
-                if not amount_str or not amount_str.lstrip('-').isdigit():
-                    continue
-                amount = float(amount_str)
+                # 공백 및 콤마 제거
+                amount_str = str(row.get('thstrm_amount', '')).replace(',', '').strip()
+                
+                # isdigit() 대신 float 변환 시도로 숫자 여부 판별 (캐시 데이터의 .0 대응)
+                try:
+                    amount = float(amount_str)
+                    # 만약 데이터가 비어있어 'nan'으로 읽혔다면 건너뜀
+                    if pd.isna(amount):
+                        continue
+                except ValueError:
+                    continue  # 숫자로 변환할 수 없는 텍스트면 건너뜀
 
                 if acc_id in rules["ids"] or any(name in acc_nm for name in rules["names"]):
                     standard_metrics[standard_key] = amount
