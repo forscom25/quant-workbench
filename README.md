@@ -10,13 +10,16 @@
 * **`quant_env/`**: 파이썬 가상 환경 (Git 관리 제외)
 * **`.env`**: API Key 및 보안 설정 파일 (Git 관리 제외)
 
+## 종목 선별 로직
+5단계 스크리닝 파이프라인의 평가 기준과 설계 근거는 [docs/screening_criteria.md](./docs/screening_criteria.md) 참고
+
 ---
 
 ## 💻 노트북 / 새 환경 초기 세팅 (1회만 진행)
 
 1. **저장소 클론 (Git Clone)**
    ```bash
-   git clone [https://github.com/본인ID/저장소이름.git](https://github.com/본인ID/저장소이름.git)
+   git clone [https://github.com/본인ID/저장소이름.git .](https://github.com/본인ID/저장소이름.git .)
    cd QUANT_PROJECT
 
 ---
@@ -35,6 +38,8 @@
 3. **환경 변수 파일 생성 (.env)**
 최상위 루트 폴더(QUANT_PROJECT) 밑에 .env 파일을 새로 생성 후 API 키 입력
 DART_API_KEY=your_api_key_here
+
+---
 
 ## 🔄 교대 작업 루틴
 

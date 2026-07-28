@@ -37,39 +37,71 @@ class QuantDataLoader:
         except FileNotFoundError:
             self.dart_retries = 3
 
+        # config 로드 블록 하단에 추가 (DART API 일일 호출량 관리)
+        self.dart_daily_limit = self.endpoints.get("DART", {}).get("daily_limit", 9500)
+        self.dart_call_count = 0
+
         # sj_div(재무제표 종류) 필터가 추가된 다차원 매핑 룰
         self.ACCOUNT_MAPPING = {
             "revenue": {
-                "sj": "IS", "ids": ["ifrs-full_Revenue"],
+                "sj": "IS",
+                "ids": ["ifrs-full_Revenue"],
                 "names": ["매출액", "영업수익"]
                 },
             "cogs": { # 매출원가 (매출총이익률 GPM 계산용)
-                "sj": "IS", "ids": ["ifrs-full_CostOfSales"],
+                "sj": "IS",
+                "ids": ["ifrs-full_CostOfSales"],
                 "names": ["매출원가", "영업비용"]
                 },
             "gross_profit": { # 매출총이익
-                "sj": "IS", "ids": ["ifrs-full_GrossProfit"],
+                "sj": "IS",
+                "ids": ["ifrs-full_GrossProfit"],
                 "names": ["매출총이익"]
                 },
             "sga": { # 판매비와관리비 (턴어라운드 핵심 지표)
-                "sj": "IS", "ids": ["dart_SellingGeneralAdministrativeExpenses"],
+                "sj": "IS",
+                "ids": ["dart_SellingGeneralAdministrativeExpenses"],
                 "names": ["판매비와관리비", "판매비 및 일반관리비"]
                 },
             "inventory": { # 재고자산 (재고회전율 계산용)
-                "sj": "BS", "ids": ["ifrs-full_Inventories"],
+                "sj": "BS",
+                "ids": ["ifrs-full_Inventories"],
                 "names": ["재고자산"]
                 },
             "operating_income": { # 영업이익
-                "sj": "IS", "ids": ["dart_OperatingIncomeLoss"],
+                "sj": "IS",
+                "ids": ["dart_OperatingIncomeLoss"],
                 "names": ["영업이익"]
                 },
             "net_income": { # 당기순이익
-                "sj": "IS", "ids": ["ifrs-full_ProfitLoss"],
+                "sj": "IS",
+                "ids": ["ifrs-full_ProfitLoss"],
                 "names": ["당기순이익", "연결당기순이익"]
                 },
             "operating_cash_flow": { # 영업활동현금흐름 (이익 품질 검증용)
-                "sj": "CF", "ids": ["ifrs-full_CashFlowsFromUsedInOperatingActivities"],
+                "sj": "CF",
+                "ids": ["ifrs-full_CashFlowsFromUsedInOperatingActivities"],
                 "names": ["영업활동현금흐름"]
+                },
+            "total_assets": { # 자산총계
+                "sj": "BS",
+                "ids": ["ifrs-full_Assets"],
+                "names": ["자산총계"]
+                },
+            "total_liabilities": { # 부채총계
+                "sj": "BS",
+                "ids": ["ifrs-full_Liabilities"],
+                "names": ["부채총계"]
+                },
+            "total_equity": { # 자본총계
+                "sj": "BS",
+                "ids": ["ifrs-full_Equity"],
+                "names": ["자본총계"]
+                },
+            "interest_expense": { # 이자비용
+                "sj": "IS",
+                "ids": ["ifrs-full_InterestExpense", "dart_InterestExpense"],
+                "names": ["금융원가", "금융비용", "이자비용"]
                 }
         }
 
@@ -109,7 +141,7 @@ class QuantDataLoader:
         names = {t: stock.get_market_ticker_name(t) for t in df['ticker'].unique()}
         df['name'] = df['ticker'].map(names)
         
-        fdr_df = fdr.StockListing('KRX-DESC')[['Code', 'industry']]
+        fdr_df = fdr.StockListing('KRX-DESC')[['Code', 'Industry']]
         fdr_df.columns = ['ticker', 'sector']
         
         df = pd.merge(df, fdr_df, on='ticker', how='left')
@@ -133,7 +165,6 @@ class QuantDataLoader:
 
     def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011', fs_div: str = 'CFS') -> Optional[pd.DataFrame]:
         """재시도(Retry) 및 캐시 무효화가 적용된 DART 데이터 로더"""
-        # 캐시 파일명에 fs_div 추가 (CFS, OFS 구분)
         cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.csv"
         
         if self.use_cache and self._is_cache_valid(cache_file):
@@ -141,18 +172,29 @@ class QuantDataLoader:
 
         for attempt in range(self.dart_retries):
             try:
-                # API 호출 시 fs_div 파라미터 전달
+                # 일반 Exception이 아닌 RuntimeError로 발생시켜 명확히 구분
+                if self.dart_call_count >= self.dart_daily_limit:
+                    raise RuntimeError(f"[Rate Limit] DART API 일일 호출 한도({self.dart_daily_limit}회)에 도달하여 스크리닝을 중단합니다.")
+                
+                self.dart_call_count += 1
+
                 fs_df = self.dart.finstate_all(ticker, year, reprt_code=report_code, fs_div=fs_div)
                 if fs_df is not None and not fs_df.empty:
                     if self.use_cache:
                         fs_df.to_csv(cache_file, index=False, encoding='utf-8-sig')
                     return fs_df
-                break  # 정상 응답이나 데이터가 없는 경우
+                break
+                
+            except RuntimeError as limit_err:
+                # 🚨 Rate Limit 에러는 재시도하지 않고 즉시 메인 프로그램으로 에러를 던짐
+                raise limit_err
+                
             except Exception as e:
+                # 기타 네트워크 에러 등은 기존처럼 3회 재시도
                 if attempt == self.dart_retries - 1:
                     warnings.warn(f"[DART API 최종 실패] {ticker} ({fs_div}): {e}")
                     return None
-                time.sleep(1) # Rate limit 방어
+                time.sleep(1)
         return None
 
     def parse_standardized_financials(self, ticker: str, year: int, report_code: str = '11011') -> Dict[str, float]:
@@ -176,21 +218,111 @@ class QuantDataLoader:
             for _, row in sj_filtered.iterrows():
                 acc_id = str(row.get('account_id', '')).strip()
                 acc_nm = str(row.get('account_nm', '')).strip()
-                
-                # 공백 및 콤마 제거
-                amount_str = str(row.get('thstrm_amount', '')).replace(',', '').strip()
-                
-                # isdigit() 대신 float 변환 시도로 숫자 여부 판별 (캐시 데이터의 .0 대응)
-                try:
-                    amount = float(amount_str)
-                    # 만약 데이터가 비어있어 'nan'으로 읽혔다면 건너뜀
-                    if pd.isna(amount):
-                        continue
-                except ValueError:
-                    continue  # 숫자로 변환할 수 없는 텍스트면 건너뜀
 
+                # ---------------------------------------------------
+                # [수정된 파싱 로직] isdigit() 대신 try-except float 캐스팅 사용
+                # ---------------------------------------------------
+                amount = float('nan')
+                
+                # 1. IS/CF 계정이면서 누적치 컬럼이 존재하는 경우 (누적치 우선)
+                if rules["sj"] in ['IS', 'CF'] and 'thstrm_add_amount' in row and pd.notna(row['thstrm_add_amount']):
+                    add_amt_str = str(row['thstrm_add_amount']).replace(',', '').strip()
+                    try:
+                        amount = float(add_amt_str)
+                    except ValueError:
+                        pass
+                
+                # 2. BS 계정이거나, IS/CF지만 누적치 컬럼이 없는 경우 기본 컬럼 사용
+                if pd.isna(amount):
+                    amt_str = str(row.get('thstrm_amount', '')).replace(',', '').strip()
+                    try:
+                        amount = float(amt_str)
+                    except ValueError:
+                        pass
+
+                if pd.isna(amount):
+                    continue
+                # ---------------------------------------------------
+            
                 if acc_id in rules["ids"] or any(name in acc_nm for name in rules["names"]):
                     standard_metrics[standard_key] = amount
                     break
 
         return standard_metrics
+
+    def get_historical_ohlcv(self, ticker: str, start_date: date, end_date: date) -> Optional[pd.DataFrame]:
+        """
+        과거 시계열 주가 및 거래량 데이터 (Stage 1 소외도 분석용)
+        """
+        date_str = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
+        cache_file = self.cache_dir / f"ohlcv_{ticker}_{date_str}.csv"
+        
+        if self.use_cache and self._is_cache_valid(cache_file):
+            return pd.read_csv(cache_file, parse_dates=['Date'], index_col='Date', encoding='utf-8-sig')
+            
+        try:
+            df = fdr.DataReader(ticker, start_date, end_date)
+            if not df.empty and self.use_cache:
+                df.to_csv(cache_file, encoding='utf-8-sig')
+            return df
+        except Exception as e:
+            warnings.warn(f"[FDR 시계열 호출 실패] {ticker}: {e}")
+            return None
+
+    def get_isolated_quarterly_financials(self, ticker: str, year: int, quarter: int) -> Dict[str, float]:
+        """
+        분기 단독 재무제표 추출 래퍼 (누적 데이터 차분 처리)
+        """
+        if quarter == 1:
+            return self.parse_standardized_financials(ticker, year, '11013')
+            
+        elif quarter == 2:
+            q2_cum = self.parse_standardized_financials(ticker, year, '11012')
+            q1_cum = self.parse_standardized_financials(ticker, year, '11013')
+
+            isolated = {}
+            for k in q2_cum:
+                sj_type = self.ACCOUNT_MAPPING[k]["sj"]
+                
+                if sj_type == "BS":
+                    # 재무상태표는 누적 개념이 없으므로 해당 분기 잔액 그대로 사용
+                    isolated[k] = q2_cum[k]
+                else:
+                    # 손익/현금흐름은 (해당 분기 누적 - 직전 분기 누적) 차분 연산
+                    isolated[k] = (q2_cum[k] - q1_cum[k]) if pd.notna(q2_cum[k]) and pd.notna(q1_cum[k]) else float('nan')
+            return isolated
+                        
+        elif quarter == 3:
+            q3_cum = self.parse_standardized_financials(ticker, year, '11014')
+            q2_cum = self.parse_standardized_financials(ticker, year, '11012')
+
+            isolated = {}
+            for k in q3_cum:
+                sj_type = self.ACCOUNT_MAPPING[k]["sj"]
+                
+                if sj_type == "BS":
+                    # 재무상태표는 누적 개념이 없으므로 해당 분기 잔액 그대로 사용
+                    isolated[k] = q3_cum[k]
+                else:
+                    # 손익/현금흐름은 (해당 분기 누적 - 직전 분기 누적) 차분 연산
+                    isolated[k] = (q3_cum[k] - q2_cum[k]) if pd.notna(q3_cum[k]) and pd.notna(q2_cum[k]) else float('nan')
+            return isolated
+                   
+        elif quarter == 4:
+            annual = self.parse_standardized_financials(ticker, year, '11011')
+            q3_cum = self.parse_standardized_financials(ticker, year, '11014')
+            
+            isolated = {}
+            for k in annual:
+                sj_type = self.ACCOUNT_MAPPING[k]["sj"]
+                
+                if sj_type == "BS":
+                    # 재무상태표는 누적 개념이 없으므로 해당 분기 잔액 그대로 사용
+                    isolated[k] = annual[k]
+                else:
+                    # 손익/현금흐름은 (해당 분기 누적 - 직전 분기 누적) 차분 연산
+                    isolated[k] = (annual[k] - q3_cum[k]) if pd.notna(annual[k]) and pd.notna(q3_cum[k]) else float('nan')
+            return isolated
+            
+        else:
+            raise ValueError("quarter는 1에서 4 사이의 정수여야 합니다.")
