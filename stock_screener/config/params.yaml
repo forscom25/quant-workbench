@@ -1,4 +1,17 @@
+# 글로벌 설정 (데이터 로드 기준)
+global:
+  profitability_basis: "ttm"             # "ttm" | "annual"
+  ttm_denominator: "latest_snapshot"     # "latest_snapshot" | "avg_4q"
+  disclosure_lag_check: true             # 공시 시차 검증 여부
+
+# 1단계: 소외 섹터 발굴
 stage1_neglected_sector:
   stage1_return_weight: 0.5
   stage1_volume_weight: 0.5
   stage1_pass_ratio: 0.4
+
+# 2단계: 섹터 내 우량주 탐색
+stage2_sector_leaders:
+  roe_percentile_cutoff: 0.5             # 섹터 내 ROE 상위 50%
+  roic_percentile_cutoff: 0.5            # 섹터 내 ROIC 상위 50%
+  op_margin_std_percentile_cutoff: 0.5   # 섹터 내 영업이익률 변동성 하위 50% (낮을수록 좋음)

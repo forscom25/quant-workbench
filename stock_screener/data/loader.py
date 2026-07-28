@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import logging
 import pandas as pd
 from pykrx import stock
 import FinanceDataReader as fdr
@@ -26,6 +27,7 @@ class QuantDataLoader:
         self.cache_dir = Path("data/cache")
         if self.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger(__name__)
 
         # endpoints.json 로드 (Rate Limit 및 설정)
         # [수정 4] 상대 경로 취약점 해결 -> 절대 경로 기반 로드
@@ -197,7 +199,11 @@ class QuantDataLoader:
                 time.sleep(1)
         return None
 
-    def parse_standardized_financials(self, ticker: str, year: int, report_code: str = '11011') -> Dict[str, float]:
+    def parse_standardized_financials(self, ticker: str, year: int, report_code: str = '11011', base_date: Optional[date] = None) -> Dict[str, float]:
+        """
+        base_date가 제공될 경우 공시 시차(Disclosure Lag)를 검증하여, 
+        해당 일자 시점에 공시되지 않은 데이터는 무효(NaN) 처리합니다.
+        """
         standard_metrics = {key: float('nan') for key in self.ACCOUNT_MAPPING.keys()}
 
         # 1. 연결재무제표(CFS) 우선 요청
@@ -210,6 +216,24 @@ class QuantDataLoader:
         if target_df is None or target_df.empty or 'thstrm_amount' not in target_df.columns:
             return standard_metrics
 
+        # ---------------------------------------------------------
+        # [핵심 로직] 공시 시차 검증 (Look-ahead bias 방지)
+        # ---------------------------------------------------------
+        if base_date is not None and 'rcept_no' in target_df.columns:
+            try:
+                # DART rcept_no의 앞 8자리는 접수일자(YYYYMMDD)
+                rcept_no = str(target_df['rcept_no'].iloc[0])
+                rcept_dt = datetime.strptime(rcept_no[:8], "%Y%m%d").date()
+                
+                if rcept_dt > base_date:
+                    self.logger.warning(
+                        f"[미래참조 방지] {ticker}의 {year}년 {report_code} 보고서는 "
+                        f"{base_date} 시점에 미공시 상태입니다. (실제 공시일: {rcept_dt})"
+                    )
+                    return standard_metrics # 공시 전이므로 빈 껍데기(NaN) 반환
+            except Exception as e:
+                self.logger.error(f"[공시일 파싱 오류] {ticker}: {e}")
+        
         # 3. 재무제표 종류(sj_div) 및 계정 매핑
         for standard_key, rules in self.ACCOUNT_MAPPING.items():
             # sj_div (BS: 재무상태표, IS: 손익계산서, CF: 현금흐름표) 필터링
@@ -225,12 +249,14 @@ class QuantDataLoader:
                 amount = float('nan')
                 
                 # 1. IS/CF 계정이면서 누적치 컬럼이 존재하는 경우 (누적치 우선)
-                if rules["sj"] in ['IS', 'CF'] and 'thstrm_add_amount' in row and pd.notna(row['thstrm_add_amount']):
-                    add_amt_str = str(row['thstrm_add_amount']).replace(',', '').strip()
-                    try:
-                        amount = float(add_amt_str)
-                    except ValueError:
-                        pass
+                # [개선] 컬럼 존재 여부 사전 확인 (KeyError 방지)
+                if rules["sj"] in ['IS', 'CF'] and 'thstrm_add_amount' in target_df.columns:
+                    if pd.notna(row['thstrm_add_amount']):
+                        add_amt_str = str(row['thstrm_add_amount']).replace(',', '').strip()
+                        try:
+                            amount = float(add_amt_str)
+                        except ValueError:
+                            pass
                 
                 # 2. BS 계정이거나, IS/CF지만 누적치 컬럼이 없는 경우 기본 컬럼 사용
                 if pd.isna(amount):
@@ -269,16 +295,16 @@ class QuantDataLoader:
             warnings.warn(f"[FDR 시계열 호출 실패] {ticker}: {e}")
             return None
 
-    def get_isolated_quarterly_financials(self, ticker: str, year: int, quarter: int) -> Dict[str, float]:
+    def get_isolated_quarterly_financials(self, ticker: str, year: int, quarter: int, base_date: Optional[date] = None) -> Dict[str, float]:
         """
-        분기 단독 재무제표 추출 래퍼 (누적 데이터 차분 처리)
+        분기 단독 재무제표 추출 래퍼 (누적 데이터 차분 처리, base_date를 전달하여 공시 시차 검증)
         """
         if quarter == 1:
-            return self.parse_standardized_financials(ticker, year, '11013')
+            return self.parse_standardized_financials(ticker, year, '11013', base_date)
             
         elif quarter == 2:
-            q2_cum = self.parse_standardized_financials(ticker, year, '11012')
-            q1_cum = self.parse_standardized_financials(ticker, year, '11013')
+            q2_cum = self.parse_standardized_financials(ticker, year, '11012', base_date)
+            q1_cum = self.parse_standardized_financials(ticker, year, '11013', base_date)
 
             isolated = {}
             for k in q2_cum:
@@ -293,8 +319,8 @@ class QuantDataLoader:
             return isolated
                         
         elif quarter == 3:
-            q3_cum = self.parse_standardized_financials(ticker, year, '11014')
-            q2_cum = self.parse_standardized_financials(ticker, year, '11012')
+            q3_cum = self.parse_standardized_financials(ticker, year, '11014', base_date)
+            q2_cum = self.parse_standardized_financials(ticker, year, '11012', base_date)
 
             isolated = {}
             for k in q3_cum:
@@ -309,8 +335,8 @@ class QuantDataLoader:
             return isolated
                    
         elif quarter == 4:
-            annual = self.parse_standardized_financials(ticker, year, '11011')
-            q3_cum = self.parse_standardized_financials(ticker, year, '11014')
+            annual = self.parse_standardized_financials(ticker, year, '11011', base_date)
+            q3_cum = self.parse_standardized_financials(ticker, year, '11014', base_date)
             
             isolated = {}
             for k in annual:
