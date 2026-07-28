@@ -38,6 +38,9 @@
 3. **환경 변수 파일 생성 (.env)**
 최상위 루트 폴더(QUANT_PROJECT) 밑에 .env 파일을 새로 생성 후 API 키 입력
 DART_API_KEY=your_api_key_here
+KRX_API_KEY=your_api_key_here
+KRX_ID=your_ID_here
+KRX_PW=your_PW_here
 
 ---
 

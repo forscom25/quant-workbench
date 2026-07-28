@@ -1,0 +1,4 @@
+stage1_neglected_sector:
+  stage1_return_weight: 0.5
+  stage1_volume_weight: 0.5
+  stage1_pass_ratio: 0.4

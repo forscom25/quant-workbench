@@ -8,6 +8,7 @@ python-dotenv
 pandas
 numpy
 scipy
+PyYAML
 
 # Visualization & Utilities
 matplotlib
