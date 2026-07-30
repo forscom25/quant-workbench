@@ -15,3 +15,5 @@ stage2_sector_leaders:
   roe_percentile_cutoff: 0.5             # 섹터 내 ROE 상위 50%
   roic_percentile_cutoff: 0.5            # 섹터 내 ROIC 상위 50%
   op_margin_std_percentile_cutoff: 0.5   # 섹터 내 영업이익률 변동성 하위 50% (낮을수록 좋음)
+  op_margin_lookback_q: 8                # 영업이익률 변동성 계산을 위한 과거 분기 수 (예: 8분기 = 2년)
+  op_margin_min_quarters: 4              # 영업이익률 변동성 계산을 위한 최소 분기 수 (예: 4분기 = 1년)

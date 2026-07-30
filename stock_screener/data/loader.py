@@ -352,3 +352,104 @@ class QuantDataLoader:
             
         else:
             raise ValueError("quarter는 1에서 4 사이의 정수여야 합니다.")
+
+    def get_ttm_financials(self, ticker: str, base_date: date) -> Dict[str, float]:
+        """
+        base_date 기준으로 공시가 완료된 최근 4개 분기의 재무 데이터를 조회하여 TTM을 계산합니다.
+        - IS/CF 계정 (Flow): 4개 분기 합산
+        - BS 계정 (Stock): 가장 최근 분기말 잔액 스냅샷
+        """
+        ttm_metrics = {key: float('nan') for key in self.ACCOUNT_MAPPING.keys()}
+        
+        valid_quarters = []
+        target_year = base_date.year
+        # 현재 날짜 기준 대략적인 해당 분기 계산
+        target_quarter = (base_date.month - 1) // 3 + 1
+        
+        # 최대 8개 분기(2년)까지 거슬러 올라가며 공시된 4개 분기를 찾음
+        for _ in range(8):
+            q_data = self.get_isolated_quarterly_financials(ticker, target_year, target_quarter, base_date)
+            
+            # 유효한 데이터(모두 NaN이 아닌 경우)인지 확인
+            if not all(pd.isna(v) for v in q_data.values()):
+                valid_quarters.append(q_data)
+                
+            if len(valid_quarters) == 4:
+                break
+                
+            # 이전 분기로 이동
+            target_quarter -= 1
+            if target_quarter == 0:
+                target_quarter = 4
+                target_year -= 1
+
+        # 4개 분기 데이터를 모두 확보하지 못한 경우 (상장된지 1년 미만이거나 공시 누락 등)
+        if len(valid_quarters) < 4:
+            self.logger.warning(f"[TTM 계산 불가] {ticker}: {base_date} 기준 유효한 4개 분기 데이터를 찾지 못했습니다.")
+            return ttm_metrics
+
+        # 가장 최근 분기 (인덱스 0)
+        latest_q = valid_quarters[0]
+        
+        for key, rules in self.ACCOUNT_MAPPING.items():
+            if rules["sj"] == "BS":
+                # 재무상태표(Stock)는 가장 최근 분기말 잔액 스냅샷 사용
+                ttm_metrics[key] = latest_q.get(key, float('nan'))
+            else:
+                # 손익계산서/현금흐름표(Flow)는 4개 분기 합산
+                # 하나라도 결측치가 있으면 합산값의 왜곡을 막기 위해 NaN 유지
+                val_list = [q.get(key, float('nan')) for q in valid_quarters]
+                if any(pd.isna(v) for v in val_list):
+                    ttm_metrics[key] = float('nan')
+                else:
+                    ttm_metrics[key] = sum(val_list)
+
+        return ttm_metrics
+
+    def get_annual_financials(self, ticker: str, base_date: date) -> Dict[str, float]:
+        """
+        base_date 기준으로 공시가 완료된 가장 최근의 사업보고서(연간) 데이터를 반환합니다.
+        """
+        annual_metrics = {key: float('nan') for key in self.ACCOUNT_MAPPING.keys()}
+        
+        # 최대 3년 전까지 거슬러 올라감
+        target_year = base_date.year
+        for y in range(target_year, target_year - 3, -1):
+            data = self.parse_standardized_financials(ticker, y, '11011', base_date)
+            # 유효한 데이터가 존재하면 즉시 반환 (가장 최근 확정치)
+            if not all(pd.isna(v) for v in data.values()):
+                return data
+                
+        self.logger.warning(f"[연간 데이터 불가] {ticker}: {base_date} 기준 최근 3년 내 공시된 사업보고서를 찾지 못했습니다.")
+        return annual_metrics
+
+    def get_quarterly_op_margin_series(self, ticker: str, base_date: date, n_quarters: int = 8) -> list:
+        """
+        base_date 기준으로 최근 n개 분기의 '단독' 영업이익률 시계열을 조회합니다.
+        - 결측치나 공시 전 데이터는 제외하지 않고 float('nan')으로 채워서 반환합니다.
+        """
+        op_margin_series = []
+        target_year = base_date.year
+        # 현재 날짜 기준 대략적인 분기 계산
+        target_quarter = (base_date.month - 1) // 3 + 1
+        
+        for _ in range(n_quarters):
+            # 분기 단독 데이터 추출 (공시 시차 검증 포함)
+            q_data = self.get_isolated_quarterly_financials(ticker, target_year, target_quarter, base_date)
+            
+            op_inc = q_data.get('operating_income', float('nan'))
+            rev = q_data.get('revenue', float('nan'))
+            
+            # 매출액이 존재하고 0이 아닌 경우에만 비율 계산
+            if pd.notna(op_inc) and pd.notna(rev) and rev != 0:
+                op_margin_series.append(float(op_inc / rev))
+            else:
+                op_margin_series.append(float('nan'))
+                
+            # 이전 분기로 이동
+            target_quarter -= 1
+            if target_quarter == 0:
+                target_quarter = 4
+                target_year -= 1
+                
+        return op_margin_series

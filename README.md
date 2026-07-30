@@ -15,6 +15,7 @@
 
 ## 종목 선별 로직
 5단계 스크리닝 파이프라인의 평가 기준과 설계 근거는 [docs/screening_criteria.md](./docs/screening_criteria.md) 참고
+
 ---
 
 ## 💻 노트북 / 새 환경 초기 세팅 (1회만 진행)
