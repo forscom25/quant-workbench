@@ -191,3 +191,4 @@ def compute_std(series: list[float], min_valid_points: int = 4) -> tuple[float, 
 - [ ] Stage4의 PBR `NaN`/자본잠식 임시 구제 통과가 Stage5에서 실제로 재검증되는지 pipeline 흐름 확인
 - [ ] `backtest/forward_return.py` 구현 (아직 미착수)
 - [ ] `main.py` 실행 진입점 구현 (아직 미착수)
+- [ ] 실 데이터를 활용한 전체 파이프라인 점검 필요

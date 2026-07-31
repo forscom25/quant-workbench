@@ -31,7 +31,17 @@ class FundamentalImproveScreener:
             # 데이터 부족 시 처리
             if len(q_series) < 6 or all(pd.isna(q_series[0].get('revenue', np.nan)) for _ in range(6)):
                 na_reasons.append("DATA_TOO_SHORT")
-                metrics_data.append({'ticker': ticker, 'sector': sector, 'na_reasons': ",".join(na_reasons)})
+                metrics_data.append({
+                    'ticker': ticker,
+                    'sector': sector,
+                    'sga_ratio_yoy_q1': np.nan,
+                    'sga_ratio_yoy_q2': np.nan,
+                    'is_sga_decreasing_consecutively': False,  # 데이터 없으면 무조건 False(탈락)
+                    'sales_growth_yoy': np.nan,
+                    'inventory_turnover_yoy': np.nan,
+                    'gpm_yoy': np.nan,
+                    'na_reasons': ",".join(na_reasons)
+                })
                 continue
 
             # 2. 지표 계산 함수 (안전한 나눗셈)

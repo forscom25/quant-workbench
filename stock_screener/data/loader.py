@@ -165,6 +165,60 @@ class QuantDataLoader:
             
         return df
 
+    def get_sector_metrics(self, base_date: date) -> pd.DataFrame:
+        """
+        pykrx를 활용하여 KOSPI 전 종목의 기간별 수익률과 거래대금을 수집한 뒤,
+        섹터(Industry)별로 그룹화하여 반환합니다.
+        """
+        from pykrx import stock
+        from dateutil.relativedelta import relativedelta
+        import pandas as pd
+
+        date_str = base_date.strftime("%Y%m%d")
+        date_1m = (base_date - relativedelta(months=1)).strftime("%Y%m%d")
+        date_6m = (base_date - relativedelta(months=6)).strftime("%Y%m%d")
+        date_1y = (base_date - relativedelta(years=1)).strftime("%Y%m%d")
+        
+        self.logger.info("실전 데이터 조달: pykrx 기간별 수익률/거래대금 API 호출 중...")
+        
+        # 1. 기간별 등락률 및 거래대금 (KOSPI 전 종목)
+        df_1m = stock.get_market_price_change(date_1m, date_str, market="KOSPI").reset_index()
+        df_6m = stock.get_market_price_change(date_6m, date_str, market="KOSPI").reset_index()
+        df_1y = stock.get_market_price_change(date_1y, date_str, market="KOSPI").reset_index()
+        
+        # 컬럼명 정리 및 등락률 단위 변환 (% -> 소수점)
+        df_1m = df_1m[['티커', '등락률', '거래대금']].rename(columns={'티커': 'ticker', '등락률': 'return_1m', '거래대금': 'vol_1m'})
+        df_1m['return_1m'] = df_1m['return_1m'] / 100.0
+        
+        df_6m = df_6m[['티커', '등락률']].rename(columns={'티커': 'ticker', '등락률': 'return_6m'})
+        df_6m['return_6m'] = df_6m['return_6m'] / 100.0
+        
+        df_1y = df_1y[['티커', '거래대금']].rename(columns={'티커': 'ticker', '거래대금': 'vol_1y'})
+        
+        # 2. 유니버스(섹터 정보)와 병합
+        # (미리 구현된 get_kospi_universe 메서드를 통해 티커-섹터 매핑을 가져옵니다)
+        universe = self.get_kospi_universe(base_date)
+        df = pd.merge(universe, df_1m, on='ticker', how='left')
+        df = pd.merge(df, df_6m, on='ticker', how='left')
+        df = pd.merge(df, df_1y, on='ticker', how='left')
+        
+        # 3. 섹터별 집계 (수익률은 동일가중 평균, 거래대금은 단순 합산)
+        market_vol_1m = df['vol_1m'].sum()
+        market_vol_1y = df['vol_1y'].sum()
+        
+        sector_group = df.groupby('sector').agg(
+            return_1m=('return_1m', 'mean'),
+            return_6m=('return_6m', 'mean'),
+            sector_vol_1m=('vol_1m', 'sum'),
+            sector_vol_1y=('vol_1y', 'sum')
+        ).reset_index()
+        
+        # 4. 시장 전체 대비 거래대금 비중 산출
+        sector_group['vol_prop_1m'] = sector_group['sector_vol_1m'] / market_vol_1m
+        sector_group['vol_prop_1y'] = sector_group['sector_vol_1y'] / market_vol_1y
+        
+        return sector_group[['sector', 'return_1m', 'return_6m', 'vol_prop_1m', 'vol_prop_1y']]
+
     def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011', fs_div: str = 'CFS') -> Optional[pd.DataFrame]:
         """재시도(Retry) 및 캐시 무효화가 적용된 DART 데이터 로더"""
         cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.csv"
@@ -456,13 +510,34 @@ class QuantDataLoader:
 
     def get_quarterly_financials_series(self, ticker: str, base_date: date, n_quarters: int = 6) -> list:
         """
-        base_date 기준으로 최근 n개 분기의 '단독' 재무제표 딕셔너리 시계열을 반환합니다.
-        (인덱스 0이 가장 최근 분기, 1이 직전 분기... 4가 전년 동기)
+        base_date 기준으로 공시가 완료된 가장 최신 분기를 찾은 후, 해당 시점부터 과거 n개 분기의 '단독' 재무제표 딕셔너리 시계열을 반환합니다.
         """
         financials_series = []
         target_year = base_date.year
         target_quarter = (base_date.month - 1) // 3 + 1
+
+        # 1. 공시 시차(Lag)를 고려하여 데이터가 존재하는 가장 최신 분기(t=0) 찾기
+        found_latest = False
+        max_lag_search = 3 # 최대 3개 분기 과거까지 탐색
         
+        for _ in range(max_lag_search):
+            q_data = self.get_isolated_quarterly_financials(ticker, target_year, target_quarter, base_date)
+            # 매출액 데이터가 존재한다면 공시가 완료된 분기로 판단
+            if q_data and pd.notna(q_data.get('revenue', float('nan'))):
+                found_latest = True
+                break
+            
+            # 데이터가 없으면 한 분기 전으로 이동
+            target_quarter -= 1
+            if target_quarter == 0:
+                target_quarter = 4
+                target_year -= 1
+                
+        if not found_latest:
+            self.logger.warning(f"[{ticker}] 최근 공시 데이터를 찾을 수 없습니다.")
+            return []
+
+        # 2. 확정된 t=0 기점으로부터 n_quarters 만큼 시계열 수집
         for _ in range(n_quarters):
             q_data = self.get_isolated_quarterly_financials(ticker, target_year, target_quarter, base_date)
             financials_series.append(q_data)

@@ -29,6 +29,21 @@ class QuantPipeline:
         self.stage4 = ValuationScreener(params.get('stage4_valuation', {}))
         self.stage5 = FinancialHealthScreener(params.get('stage5_financial_health', {}))
 
+    def _accumulate_results(self, input_df: pd.DataFrame, stage_result_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        [핵심 로직] 이전 단계의 데이터를 유실하지 않도록, 통과한 종목(ticker)을 기준으로 
+        기존 컬럼(input_df)과 새로 계산된 컬럼(stage_result_df)을 안전하게 병합합니다.
+        """
+        if stage_result_df.empty:
+            return pd.DataFrame()
+            
+        # 중복되는 컬럼(예: sector) 충돌 방지: ticker만 남기고 교집합 제외
+        cols_to_use = stage_result_df.columns.difference(input_df.columns).tolist()
+        cols_to_use.append('ticker')
+        
+        # 교집합인 ticker를 기준으로 inner merge (통과한 종목만 남으면서 이전 데이터 누적)
+        return pd.merge(input_df, stage_result_df[cols_to_use], on='ticker', how='inner')
+    
     def run(self, base_date: date) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
         파이프라인을 실행합니다.
