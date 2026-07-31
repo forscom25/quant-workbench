@@ -17,3 +17,21 @@ stage2_sector_leaders:
   op_margin_std_percentile_cutoff: 0.5   # 섹터 내 영업이익률 변동성 하위 50% (낮을수록 좋음)
   op_margin_lookback_q: 8                # 영업이익률 변동성 계산을 위한 과거 분기 수 (예: 8분기 = 2년)
   op_margin_min_quarters: 4              # 영업이익률 변동성 계산을 위한 최소 분기 수 (예: 4분기 = 1년)
+
+# 3단계: 재무 개선주 탐색
+stage3_fundamental_improve:
+  sga_lookback_quarters: 6               # YoY 비교를 위해 최소 6개 분기(현재~5분기 전) 데이터 필요
+  require_sales_growth: true             # 매출 성장 동반 여부
+  require_gpm_improvement: true          # GPM 유지/개선 여부
+  require_inventory_turnover_up: true    # 재고회전율 개선 여부
+
+# 4단계: 밸류에이션 기반 저평가 탐색
+stage4_valuation:
+  pbr_percentile_cutoff: 0.5         # 섹터 내 PBR 하위 50% (저평가) 우선
+  bps_growth_yoy_min: 0.0            # BPS가 전년 동기 대비 줄어들지 않았을 것 (빅배스/손상차손 방어)
+  roe_value_trap_threshold: 0.05     # ROE가 5% 미만인데 PBR도 낮으면 밸류트랩으로 간주 (우선순위 하향)
+
+# 5단계: 재무 건전성 기반 최종 필터링
+stage5_financial_health:
+  debt_ratio_percentile_cutoff: 0.5  # 섹터 내 부채비율 하위 50% (부채비율이 낮을수록 통과)
+  interest_coverage_min: 1.5         # 최소 이자보상배율 (영업이익이 이자비용의 1.5배 이상)

@@ -453,3 +453,53 @@ class QuantDataLoader:
                 target_year -= 1
                 
         return op_margin_series
+
+    def get_quarterly_financials_series(self, ticker: str, base_date: date, n_quarters: int = 6) -> list:
+        """
+        base_date 기준으로 최근 n개 분기의 '단독' 재무제표 딕셔너리 시계열을 반환합니다.
+        (인덱스 0이 가장 최근 분기, 1이 직전 분기... 4가 전년 동기)
+        """
+        financials_series = []
+        target_year = base_date.year
+        target_quarter = (base_date.month - 1) // 3 + 1
+        
+        for _ in range(n_quarters):
+            q_data = self.get_isolated_quarterly_financials(ticker, target_year, target_quarter, base_date)
+            financials_series.append(q_data)
+            
+            target_quarter -= 1
+            if target_quarter == 0:
+                target_quarter = 4
+                target_year -= 1
+                
+        return financials_series
+
+    def get_market_fundamental_cross_section(self, base_date: date) -> pd.DataFrame:
+        """
+        base_date 기준 KOSPI 전 종목의 펀더멘털 지표(PBR, BPS 등) 스냅샷을 조회합니다.
+        (pykrx 기시산출값 활용)
+        """
+        date_str = base_date.strftime("%Y%m%d")
+        cache_file = self.cache_dir / f"fundamentals_{date_str}.csv"
+        
+        if self.use_cache and self._is_cache_valid(cache_file):
+            return pd.read_csv(cache_file, dtype={'ticker': str}, encoding='utf-8-sig')
+
+        try:
+            # pykrx를 통한 펀더멘털 데이터 수집
+            df = stock.get_market_fundamental(date_str, market="KOSPI")
+            if df.empty:
+                return pd.DataFrame()
+                
+            df = df.reset_index()
+            # 컬럼명 영문 표준화 (필요한 컬럼만 추출)
+            df = df.rename(columns={'티커': 'ticker', 'BPS': 'bps', 'PBR': 'pbr'})
+            df = df[['ticker', 'bps', 'pbr']]
+            
+            if self.use_cache:
+                df.to_csv(cache_file, index=False, encoding='utf-8-sig')
+                
+            return df
+        except Exception as e:
+            self.logger.error(f"[FDR/pykrx 펀더멘털 호출 실패] {date_str}: {e}")
+            return pd.DataFrame()

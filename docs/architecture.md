@@ -1,18 +1,18 @@
 # stock_screener 아키텍처 노트
 
 > 5단계 필터링 파이프라인(소외 섹터 → 섹터 리더 → 펀더멘털 개선 → 밸류에이션 → 재무 건전성) 기반 종목 스크리너.
-> 이 문서는 **현재 확정된 설계 상태**만 반영한다. 논의 과정·미결 사항·TODO는 [`docs/decisions_log.md`](./decisions_log.md) 참고.
-> 스크리닝 기준(임계치·개선 근거)은 [`docs/screening_criteria.md`](./screening_criteria.md) 참고.
+> 이 문서는 **항상 현재 확정된 설계 상태**를 반영한다. 논의 과정·미결 항목·진행 메모는 [`docs/decisions_log.md`](./decisions_log.md) 참고.
+> 평가 기준(임계치, 개선 근거)은 [`docs/screening_criteria.md`](./screening_criteria.md) 참고.
 
 ## 폴더 구조
 
 ```
 stock_screener/
 ├── config/
-│   ├── endpoints.json     # API 관리 (rate limit, retry 설정)
-│   └── params.yaml         # 모든 임계치·가중치 (하드코딩 금지)
+│   ├── endpoints.json      # API 관리 (rate limit, retry 설정)
+│   └── params.yaml          # 모든 임계치·가중치 (하드코딩 금지)
 ├── data/
-│   └── loader.py            # 시세/재무/섹터 데이터 수집·캐싱 (원자료 정제만)
+│   └── loader.py             # 시세/재무/섹터 원자료 수집·캐싱 (계산 없음)
 ├── stages/
 │   ├── stage1_neglected_sector.py
 │   ├── stage2_sector_leaders.py
@@ -20,26 +20,27 @@ stock_screener/
 │   ├── stage4_valuation.py
 │   └── stage5_financial_health.py
 ├── core/
-│   ├── pipeline.py          # 단계 실행 오케스트레이터 (계산 로직 없음)
-│   ├── schema.py            # 데이터클래스 (입출력 표준 정의)
-│   └── metrics_utils.py     # 재사용 가능한 순수 통계 함수 (std, z-score 등)
+│   ├── pipeline.py           # 단계 실행 오케스트레이터 (계산 없음)
+│   ├── schema.py             # 데이터클래스 (입출력 표준 정의)
+│   └── metrics_utils.py      # 재사용 가능한 순수 통계 함수 (std, 추세 판정 등)
 ├── backtest/
-│   └── forward_return.py    # 각 단계별 신호 검증
-└── main.py                  # 최종 실행 진입점
+│   └── forward_return.py     # 각 단계별 신호 검증
+└── main.py                   # 최종 실행 진입점
 ```
 
 ### 역할 분담
 
 - **`main.py`**: 실행 진입점. CLI 인자 파싱, 실행 날짜 지정, 결과 출력/저장만 담당. 필터링 로직은 모른다.
-- **`core/pipeline.py`**: 오케스트레이터. loader의 raw 데이터를 `StockProfile`로 감싸고, stage1~5를 순차 실행하며 탈락 종목을 걸러내는 깔때기(N → M → K → ...) 로직을 담당. `backtest/forward_return.py`에서도 재사용 가능해야 하므로 stage 로직과 분리 유지. **계산 로직은 한 줄도 포함하지 않는다** (조건문이 생기면 stage로 옮길 신호).
-- **`stages/*.py`**: `StockProfile` 하나를 받아 판정 결과만 반환하는 순수 함수 지향. 독립 테스트 용이성 확보. 지표 계산 + `params.yaml` 기준 판정을 전담.
+- **`core/pipeline.py`**: 오케스트레이터. loader의 raw 데이터를 `StockProfile`로 감싸고, stage1~5를 순차 실행하며 탈락 종목을 걸러내는 깔때기(N → M → K → ...) 로직을 담당. `backtest/forward_return.py`에서도 재사용 가능해야 하므로 stage 로직과 분리 유지. **계산 로직 0줄 원칙** — 조건문(`if roe > ...` 등)이 들어간다면 stage로 옮겨야 한다는 신호. **(구현 완료)** 실제 구현에서도 조건문·계산 로직 없이 각 stage 인스턴스를 순차 호출해 데이터프레임만 전달하는 순수 흐름 제어기로 확인됨. 탈락 종목은 버리지 않고 단계별 통과 데이터프레임을 `history` 딕셔너리에 담아 최종 결과와 함께 반환.
+- **`stages/*.py`**: `StockProfile` 하나를 받아 지표를 계산하고 판정 결과만 반환하는 순수 함수 지향. 독립 테스트 용이성 확보.
 - **`core/schema.py`**: 파이프라인 전체를 관통하는 State Machine 데이터 규격. "언제 stage를 부를지"는 모르고 "상태를 어떻게 기록할지"만 안다.
-- **`core/metrics_utils.py`**: stage들이 공통으로 쓰는 순수 통계 함수 모음 (표준편차, z-score 등). 특정 stage나 지표에 종속되지 않는 범용 로직만 위치.
+- **`core/metrics_utils.py`**: stage들이 공통으로 쓰는 순수 통계 함수 모음 (표준편차, 추세 판정 등). 특정 stage나 지표에 종속되지 않음.
 
-### 데이터 가공 책임 경계 (판단 기준)
+### loader / pipeline / stage 책임 경계
 
-> **"이 로직이 `params.yaml`의 값이 바뀌면 결과가 달라지는가?"**
-> Yes → stage 담당 / No(데이터 자체의 정합성 문제) → loader 담당
+**판단 기준(한 줄 테스트)**: "이 로직이 `params.yaml`의 값이 바뀌면 결과가 달라지는가?"
+- Yes → **stage**의 몫 (전략/기준 판단)
+- No, 데이터 자체의 정합성 문제 → **loader**의 몫 (데이터 정제)
 
 | 구분 | loader.py | pipeline.py | stages/*.py |
 |---|---|---|---|
@@ -47,18 +48,27 @@ stock_screener/
 | 계정명 표준화 (CFS/OFS, sj_div) | ✅ | ❌ | ❌ |
 | point-in-time 정합성 (base_date 검증) | ✅ | ❌ | ❌ |
 | flow/stock 구분 (TTM 합산 vs 스냅샷) | ✅ | ❌ | ❌ |
-| 시계열 원자료 취득 (예: 분기별 영업이익률 리스트) | ✅ | ❌ | ❌ |
-| 시계열 통계 계산 (표준편차 등) | ❌ | ❌ | ✅ (`metrics_utils` 호출) |
-| 비율 계산 (ROE, ROIC 등) | ❌ | ❌ | ✅ |
-| pass/fail 판정 (`params.yaml` 임계치 비교) | ❌ | ❌ | ✅ |
-| `StockProfile` 객체 조립 | ❌ | ✅ | ❌ |
+| 시계열 원자료 취득 (분기별 리스트 등) | ✅ | ❌ | ❌ |
+| 비율 계산 (ROE, 표준편차 등) | ❌ | ❌ | ✅ (metrics_utils 호출) |
+| pass/fail 판정 (params.yaml 임계치 비교) | ❌ | ❌ | ✅ |
+| StockProfile 객체 조립 | ❌ | ✅ | ❌ |
 | stage 순차 호출·탈락 종목 관리 | ❌ | ✅ | ❌ |
 
-**원칙**: loader는 "전략과 무관하게 항상 옳아야 하는 원자료"까지만 책임진다. 예를 들어 loader가 `profitability_basis`(TTM/연간) 같은 config 값을 직접 읽어 내부 분기하는 것은 지양 — loader는 `get_ttm_financials()` / `get_annual_financials()` 둘 다 범용 유틸로 제공하고, 어느 걸 쓸지는 stage가 결정한다.
+**적용 예시 — TTM 합산 여부는 stage가 결정, 계산 규칙은 loader가 보장**:
+```python
+# loader.py — 도구만 제공, 어떤 걸 쓸지는 모름
+def get_ttm_financials(self, ticker, base_date) -> dict: ...
+def get_annual_financials(self, ticker, base_date) -> dict: ...
 
-### 결정 대기 중
+# stage2_sector_leaders.py — params.yaml 보고 결정 + 비율 계산
+basis = params['profitability_basis']
+raw = loader.get_ttm_financials(...) if basis == 'ttm' else loader.get_annual_financials(...)
+roe = raw['net_income'] / raw['equity']
+```
 
-`docs/decisions_log.md`의 `[진행 중]` 항목 참고.
+### 탈락 종목 처리 방식 (구현 완료)
+
+`mark_failed()`된 종목은 pipeline에서 완전히 버리지 않는다. `core/pipeline.py`가 단계별 통과 데이터프레임을 `history` 딕셔너리에 담아 최종 결과와 함께 반환하는 방식으로 확정 — 사후 분석("이 종목이 왜 stage2에서 떨어졌는지")과 디버깅이 쉬워짐. 별도의 복잡한 상태 객체 대신 단순 딕셔너리 축적으로 유지.
 
 ---
 
@@ -96,37 +106,25 @@ stock_screener/
 | 6 | `config/endpoints.json` 상대경로 → cwd에 따라 `FileNotFoundError` | `Path(__file__).resolve().parent.parent` 기반 절대경로 |
 | 7 | DART API 재시도/rate limit 로직 부재 | `dart_retries` + `time.sleep(1)` 재시도 로직 추가 |
 | 8 | 캐시 무효화 전략 부재 (정정공시 시 stale) | `_is_cache_valid`로 30일(`cache_days`) 만료 |
+| 9 | DART 일일 호출량 관리 부재 (CFS/OFS 이중 호출 + 분기 n개 조합 시 한도 소진 위험) | `dart_daily_limit` 카운터 구현. 한도 도달 시 조용히 새지 않고 `RuntimeError`로 스크리닝 즉시 중단해 원인 파악 쉽게 처리 |
 
 ### 알려진 한계 (당장 급하지 않음)
 - **생존편향(Survivorship Bias)**: `fdr.StockListing('KRX-DESC')`는 현재 상장 종목만 포함. 과거 시점에 상장폐지된 종목은 섹터가 `'기타'`로 뭉뚱그려짐. `missing_sector_ratio > 5%` 시 경고 로깅 추가함 — 백테스트 해석 시 참고할 것.
 - **과거 시점 캐시 만료 정책**: 확정된 과거 데이터(`base_date` < 오늘-7일)는 절대 안 바뀌므로 30일 만료 룰이 비효율적. 필요 시 개선.
-- **DART 일일 호출량 관리 부재**: 종목당 CFS/OFS + 분기 n개 조합으로 호출 수가 누적되면 전종목 스크리닝 시 일일 한도 소진 위험. `daily_limit` 카운터 추가 검토 필요.
 
-### 밸류에이션 지표 소스 — pykrx 우선 활용
+### 밸류에이션 원자료는 pykrx 기시산출값 사용
+PBR/BPS/PER은 DART 계정을 조합해 직접 계산하지 않고 **`pykrx.stock.get_market_fundamental(date, market="KOSPI")`**로 바로 받는다. KRX가 point-in-time 기준으로 이미 계산해 제공하며, "발행주식수 별도 조회" 문제를 우회할 수 있다.
+- ROE/ROIC/영업이익률은 반대로 **DART 원본 계정으로 직접 계산 유지** — 제공자마다 정의(평균자기자본 vs 스냅샷, 투하자본 정의 등)가 달라 이 스크리너의 계산 규칙(TTM 분자·스냅샷 분모)을 스스로 통제해야 하기 때문.
 
-**결정**: BPS, PER, PBR, EPS, DIV는 DART 원자료로 직접 계산하지 않고 `pykrx.stock.get_market_fundamental(date, market="KOSPI")`로 point-in-time 조회.
-
-- KRX가 공식 계산한 값이라 발행주식수 역산 등 별도 계산이 불필요
-- Stage4의 `pbr`, `bps_growth_yoy`는 이 소스를 그대로 사용
-
-단, **ROE/ROIC/영업이익률은 이 방식을 쓰지 않고 DART raw 계정으로 직접 계산**한다 (아래 "지표 계산 기준" 참고) — 이유:
-1. ROIC은 특히 "투하자본" 정의가 제공자마다 상이해 정의 통제권이 필요
-2. 이 스크리너가 채택한 TTM 분자 + 스냅샷 분모 규칙과 외부 계산값의 평균 처리 방식이 다를 수 있음
-3. 공시 시차(`rcept_dt < base_date`) 검증이 raw 계정을 직접 다룰 때만 가능
-
-### 시계열 원자료 제공 원칙
-
-`op_margin_std`처럼 변동성을 계산하는 지표는 TTM 단일 스냅샷이 아니라 **최근 n개 분기의 개별(단독) 시계열**이 필요하다. 이런 지표를 위해 loader는:
-
-- `get_quarterly_op_margin_series(ticker, base_date, n_quarters)` 같은 메서드로 **분기 단독값 리스트**를 반환 (TTM 아님 — TTM은 이동합산이라 변동성이 인위적으로 축소됨)
-- 결측 분기는 리스트에서 제외하지 말고 `float('nan')`으로 채워 반환 → stage/`metrics_utils`가 유효 데이터 개수를 판단할 수 있게 함
-- 시계열을 받은 뒤의 통계 계산(표준편차 등)은 `core/metrics_utils.py`의 공용 함수가 담당 (예: `compute_std(series, min_valid_points)`), loader는 계산하지 않음
-
-### 다음 확장 예정 (stage 구현을 위해 필요)
-1. **OHLCV 시계열 메서드**: stage1 소외도 계산(6개월 섹터별 수익률/거래대금 z-score)에 필요. `fdr.DataReader` 또는 pykrx 시계열 활용.
-2. **분기 단독값 차분(isolation) wrapper**: `get_isolated_quarterly_financials()`. 1·3분기 누적치 vs 단독치 문제 — **BS 항목(잔액)은 차분하면 안 되고 IS/CF 항목(흐름)만 차분 대상**. 구현 중 발견된 버그: `thstrm_nm` 텍스트 매칭으로 "누적/단독"을 판별하는 방식은 보고서마다 표기가 달라 신뢰 불가 → `thstrm_add_amount` 컬럼 존재 여부로 판별하는 방식 검토 중.
-3. **추가 계정 매핑**: 자산총계, 부채총계, 자본총계, 이자비용 (부채비율/ROE/이자보상배율용).
-4. **분기별 시계열 취득 메서드**: `op_margin_std` 등 변동성 지표용 (`get_quarterly_op_margin_series`, 위 참고).
+### 확장된 원자료 메서드 (구현 완료)
+1. **OHLCV 시계열**: stage1 소외도 계산(6개월 섹터별 수익률/거래대금 z-score)용. `fdr.DataReader`/pykrx 시계열 기반 구현.
+2. **분기 단독값 차분(isolation) 로직**: 텍스트(`thstrm_nm`) 매칭 방식은 보고서마다 표기가 달라 신뢰 불가하고 실제 이중 차감 버그로 이어져 폐기. **`thstrm_add_amount` 컬럼 존재 여부**로 누적/단독을 판별하는 try-except 구조로 확정 및 구현 완료.
+   - ⚠️ **검증 권장**: `thstrm_add_amount`/`thstrm_amount` 중 어느 쪽이 누적이고 단독인지는 계정·보고서 종류별로 raw 응답을 직접 대조해 재확인해두는 걸 권장 (이전 버그도 확인 없이 가정했다가 발생했던 것이므로).
+   - **BS(잔액) 항목은 차분 대상 아님** — `sj_div`로 분기해 BS는 스냅샷 그대로, IS/CF만 차분 적용.
+3. **추가 계정 매핑**: 자산총계, 부채총계, 자본총계, 이자비용 (부채비율/ROE/이자보상배율용) 반영 완료.
+4. **`get_quarterly_op_margin_series(ticker, base_date, n_quarters=8)`**: Stage2 `op_margin_std`(변동성) 계산용. TTM이 아닌 분기 **단독**값으로 반환, 결측 분기는 `float('nan')`으로 채움.
+5. **`get_quarterly_financials_series()`**: 분기별 재무 시계열을 묶어서 반환하는 범용 wrapper (Stage3/4의 YoY 비교용).
+6. **`get_market_fundamental_cross_section(base_date)`**: pykrx `get_market_fundamental` 기반 point-in-time PBR/BPS/PER 스냅샷.
 
 ---
 
@@ -146,8 +144,6 @@ ROIC = TTM NOPAT (4분기 합산) / 최근 분기말 투하자본 (스냅샷)
 영업이익률 = TTM 영업이익 / TTM 매출액   (둘 다 흐름값이라 합산 OK)
 ```
 
-`op_margin_std`(영업이익률 변동성)는 위 TTM 영업이익률과는 별개로, **분기별 단독 영업이익률 시계열**(TTM 아님)의 표준편차로 계산한다 — TTM으로 계산하면 변동성이 이동평균 효과로 축소되어 지표 취지와 어긋남.
-
 ### 필수 검증: 공시 시차(disclosure lag)
 분기보고서는 분기말 이후 45일, 사업보고서는 회계연도말 이후 90일이 법정 제출기한. `report_code`만으로 "이 분기 데이터"라 가정하면 안 되고, **`rcept_dt`(접수일자) < `base_date`** 검증이 반드시 필요 (schema.py의 `inject_sector_info` base_date 검증과 동일한 원칙을 재무데이터에도 적용).
 
@@ -156,16 +152,42 @@ ROIC = TTM NOPAT (4분기 합산) / 최근 분기말 투하자본 (스냅샷)
 profitability_basis: "ttm"          # "ttm" | "annual"
 ttm_denominator: "latest_snapshot"  # "latest_snapshot" | "avg_4q"
 disclosure_lag_check: true          # rcept_dt < base_date 강제 검증
-op_margin_lookback_q: 8              # op_margin_std 계산에 쓸 분기 수
-op_margin_min_quarters: 4            # 최소 유효 분기 수 (미달 시 NOT_COMPUTABLE)
+op_margin_lookback_q: 8             # 변동성 계산용 시계열 길이
+op_margin_min_quarters: 4           # 최소 유효 분기 수 (미만이면 NOT_COMPUTABLE)
 ```
 
 ---
 
-## 다음 작업 순서 (미정 부분)
+## core/metrics_utils.py — 재사용 통계 함수
 
-- [ ] `pipeline.py` 오케스트레이터 구현 (탈락 종목 보존 정책 먼저 결정)
-- [ ] `core/metrics_utils.py` 신설 (compute_std 등)
-- [ ] `data/loader.py`: OHLCV 시계열 + 분기 차분 wrapper + 추가 계정 매핑 + 분기별 시계열 메서드
-- [ ] `config/params.yaml` 설계 (TTM 기준, op_margin lookback 등 반영)
-- [ ] `stage1_neglected_sector.py` 구현
+여러 stage에서 "시계열을 놓고 변동성/추세를 판단"하는 패턴이 반복될 것으로 예상 (Stage2 `op_margin_std`, Stage3 `is_sga_decreasing_consecutively` 등). 각 stage에 흩어져 중복·미묘하게 다른 구현(ddof 차이, 결측 처리 차이)이 생기는 걸 막기 위해 공용 순수 함수로 관리한다.
+
+```python
+def compute_std(series: list[float], min_valid_points: int = 4) -> tuple[float, MetricStatus]:
+    """결측(nan) 제외 후 표본표준편차 계산. 유효 표본 부족 시 NOT_COMPUTABLE."""
+    valid = [x for x in series if not pd.isna(x)]
+    if len(valid) < min_valid_points:
+        return float('nan'), MetricStatus.NOT_COMPUTABLE
+    return float(np.std(valid, ddof=1)), MetricStatus.COMPUTED
+```
+
+`min_valid_points` 같은 기준값은 함수 내부에 하드코딩하지 않고 호출부(stage)가 `params.yaml`에서 읽어 전달한다.
+
+**구현 완료.** `compute_std()`가 `NOT_COMPUTABLE`을 부여하면, 이를 곧바로 탈락시키지 않고 각 stage가 예외(exempt) 조건으로 구제하여 억울한 탈락을 방지하는 원칙을 채택 — 이 처리 정책의 구체적 태그명(`OP_MARGIN_STD_NOT_COMPUTABLE` 등)과 stage별 적용 방식은 [`screening_criteria.md`](./screening_criteria.md#공통-설계-원칙)에 정리.
+
+---
+
+## 다음 작업 순서
+
+- [x] `pipeline.py` 오케스트레이터 구현 완료 (`history` 이력 관리 포함, 계산 로직 0줄 원칙 확인됨)
+- [x] `data/loader.py`: OHLCV 시계열, 분기 차분 wrapper, 추가 계정 매핑, `get_quarterly_op_margin_series`/`get_quarterly_financials_series`/`get_market_fundamental_cross_section` 구현 완료
+- [x] `core/metrics_utils.py` 신설 및 `compute_std` 순수 함수 분리 완료
+- [x] `config/params.yaml` 설계 완료 (Stage 1~5 전체 파라미터 매핑)
+- [x] Stage 1~5 스크리너 클래스 독립 구현 완료
+
+### 남은 미결 항목
+- [ ] `op_margin_min_quarters` 기본값(4 vs 6) — 구현은 완료됐으나 값 자체는 백테스트로 튜닝 필요
+- [ ] `thstrm_add_amount`/`thstrm_amount` 중 어느 쪽이 누적·단독인지 raw 응답으로 재검증 (계정·보고서 종류별)
+- [ ] Stage4의 PBR `NaN`/자본잠식 임시 구제 통과가 Stage5에서 실제로 재검증되는지 pipeline 흐름 확인
+- [ ] `backtest/forward_return.py` 구현 (아직 미착수)
+- [ ] `main.py` 실행 진입점 구현 (아직 미착수)

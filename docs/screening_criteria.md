@@ -55,7 +55,11 @@
 
 **스키마 매핑**: `QualityMetrics` (`roe`, `roic`, `op_margin_std`)
 
-**업종 편차 주의**: 금융업/지주회사 등 ROIC 정의가 일반 제조업과 다른 업종은 `na_reasons`에 `NOT_COMPUTABLE` 또는 `CAUTION` 태깅
+**계산 방식**: `op_margin_std`는 TTM(이동합산)이 아닌 **최근 n개 분기(기본 8, `op_margin_lookback_q`)의 개별 분기 단독 영업이익률 시계열**로 계산한다 (TTM으로 만들면 변동성이 인위적으로 스무딩됨). 원자료는 `loader.get_quarterly_op_margin_series()`, 표준편차 계산은 `core/metrics_utils.compute_std()` 재사용 함수 사용 — 자세한 책임 분리는 [`architecture.md`](./architecture.md#loader--pipeline--stage-책임-경계) 참고. 유효 분기 수가 `op_margin_min_quarters`(기본 4) 미만이면 `NOT_COMPUTABLE`.
+
+**업종 편차 주의 / na_reasons 태그**
+- `OP_MARGIN_STD_NOT_COMPUTABLE`: 유효 분기 수(`op_margin_min_quarters`) 미달 (신규 상장주 등) → **구제(exempt) 통과**, 변동성 필터 미적용
+- `ROIC_NOT_COMPUTABLE`: 투하자본 계산 불가 (금융업/지주회사, 자본잠식 등) → **구제(exempt) 통과**, ROIC 필터 미적용
 
 ---
 
@@ -76,9 +80,10 @@
 
 **스키마 매핑**: `TurnaroundMetrics` (`sga_ratio_yoy_q1`, `sga_ratio_yoy_q2`, `is_sga_decreasing_consecutively`, `inventory_turnover_yoy`, `sales_growth_yoy`, `gpm_yoy`)
 
-**업종 편차 주의**:
-- 은행 등 금융업은 "재고자산", "매출원가(GPM)" 개념 자체가 없음 → `NOT_COMPUTABLE`
-- 지주회사는 매출 성격이 일반 사업회사와 달라 `sales_growth_yoy` 해석 시 `CAUTION`
+**업종 편차 주의 / na_reasons 태그**
+- `TURNAROUND_NOT_COMPUTABLE`: 재고자산·매출원가(GPM) 개념 자체가 없는 업종 (은행 등 금융업) → 해당 지표만 필터링 **면제**, 나머지 지표로 판정
+- `SALES_GROWTH_CAUTION`: 지주회사 등 매출 성격이 일반 사업회사와 달라 `sales_growth_yoy` 해석에 주의 필요 → 경고용 태그, **통과 여부에는 영향 없음**
+- `DATA_TOO_SHORT`: YoY 비교에 필요한 6분기치 데이터 미달 → 업종 특성이 아닌 데이터 가용성 문제이므로 **기계적 탈락** (구제 대상 아님)
 
 ---
 
@@ -98,7 +103,11 @@
 
 **스키마 매핑**: `ValuationMetrics` (`pbr`, `bps_growth_yoy`)
 
-**업종 편차 주의**: 자본잠식 기업은 PBR이 음수로 계산되어 의미 없어짐 (다만 5단계에서 먼저 걸러질 가능성이 높아 우선순위는 낮음)
+**데이터 소스**: `pbr`/`bps`는 DART 계정을 조합해 직접 계산하지 않고 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값을 그대로 사용한다 (발행주식수 별도 조회 불필요). 근거는 [`architecture.md`](./architecture.md#밸류에이션-원자료는-pykrx-기시산출값-사용) 참고.
+
+**업종 편차 주의 / na_reasons 태그**
+- PBR 미산출(`NaN`) 또는 0 이하(자본잠식 등): **임시 구제(exempt) 통과** — 최종 판단은 5단계 재무 건전성에서 자본잠식 여부로 걸러내는 쪽에 위임. *pipeline.py가 5단계에서 실제로 이 임시 통과 종목을 재검증하는지 구현 시 확인 필요.*
+- `is_pbr_value_trap`: 저PBR 조건은 만족하지만 ROE가 기준치 미달인 경우 `True` 태깅 → 이 경우는 예외 없이 **탈락** (2단계 페어 조건 원칙 적용)
 
 ---
 
@@ -119,9 +128,9 @@
 
 **스키마 매핑**: `FinancialHealthMetrics` (`debt_ratio`, `ocf`, `net_income`, `interest_coverage_ratio`)
 
-**업종 편차 주의**:
-- 무차입 기업은 이자비용이 0에 가까워 이자보상배율 계산이 정의되지 않음 → `NOT_COMPUTABLE`이 아니라 "재무구조가 매우 건전해서 생기는 예외"이므로 별도 케이스로 구분(통과 처리 권장)
-- 금융업은 부채비율 절대기준 적용 불가 → `CAUTION` 태깅, 업종 내 상대비교로 대체
+**업종 편차 주의 / na_reasons 태그**
+- `DEBT_RATIO_CAUTION`: 금융업 등 부채비율 절대치 비교가 무의미한 업종 → 부채비율 기준 **면제**, 업종 내 상대비교로 대체 (구체 산출 방식은 [TODO](#미정-사항-todo) 참고, 아직 미확정)
+- `interest_coverage_ratio = inf`: 무차입이거나 이자비용이 0 이하인 초우량 상태(이자수익 > 이자비용) → `NOT_COMPUTABLE`이 아니라 "재무구조가 매우 건전해서 생기는 예외"이므로 **통과 처리**
 
 ---
 
@@ -136,6 +145,10 @@
 3. **업종 특성 편차는 `na_reasons`로 태깅**: 필드 타입은 단순하게(`float`) 유지하고, 결측/계산불가/해석주의 사유는 각 Metrics 클래스의 `na_reasons: dict[str, tuple[MetricStatus, Optional[str]]]`에 개별 기록
    - `NOT_COMPUTABLE`: 계산 자체가 불가능한 경우 (예: 금융업 재고자산 없음)
    - `CAUTION`: 계산은 되나 업종 특성상 절대비교가 부적합한 경우 (예: 금융업 부채비율)
+3-1. **`NOT_COMPUTABLE`이라고 해서 전부 탈락 처리하지 않는다** — 원인이 "업종 특성상 그 지표 자체가 성립하지 않음"인지 "데이터가 실제로 부족함"인지에 따라 처리가 갈린다:
+   - **업종/구조적 이유로 계산 불가** (예: 금융업 ROIC, 무차입 기업 이자보상배율): 해당 지표 필터만 **구제(exempt) 통과**, 나머지 지표로 판정
+   - **데이터 가용성 부족** (예: 신규상장으로 YoY 비교용 6분기치 미달인 `DATA_TOO_SHORT`): 구제 대상이 아니며 **기계적 탈락**. 판단 근거 자체가 없는 것과 업종 특성상 지표가 없는 것은 다르게 취급한다.
+   - 각 stage 문서의 "업종 편차 주의" 절에 구체 태그명과 처리 정책(구제/면제/기계적 탈락)을 명시한다.
 4. **Look-ahead bias 방지**: 섹터 데이터의 기준일(`base_date`)이 종목 기준일보다 미래일 수 없도록 스키마 레벨에서 강제 (`inject_sector_info`의 `ValueError` 체크)
 5. **forward-return 백테스트로 사후 검증**: 각 단계의 임계치(percentile 컷, 통과 비율, 가중치 w1/w2 등)는 최종 확정값이 아니라 백테스트를 통해 지속적으로 튜닝되어야 함
 
@@ -156,3 +169,5 @@
 | 날짜 | 내용 |
 |---|---|
 | 2026-07-28 | 최초 작성. 5단계 기준 및 개선 근거 정리 |
+| 2026-07-31 | 2단계 `op_margin_std` 계산 방식(분기 단독값 + metrics_utils) 명시. 4단계 `pbr`/`bps` 데이터 소스를 pykrx 기시산출값으로 확정, architecture.md 참조 링크 추가 |
+| 2026-07-31 | Stage 1~5 구현 완료에 따라 각 단계 `na_reasons` 태그명(`OP_MARGIN_STD_NOT_COMPUTABLE`, `TURNAROUND_NOT_COMPUTABLE`, `DATA_TOO_SHORT`, `is_pbr_value_trap`, `DEBT_RATIO_CAUTION` 등)과 구제(exempt)/면제/기계적 탈락 처리 정책 구체화. 공통 설계 원칙에 `NOT_COMPUTABLE` 처리 분기 기준(업종 특성 vs 데이터 부족) 추가 |
