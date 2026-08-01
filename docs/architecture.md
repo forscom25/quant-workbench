@@ -31,7 +31,7 @@ stock_screener/
 ### 역할 분담
 
 - **`main.py`**: 실행 진입점. CLI 인자 파싱, 실행 날짜 지정, 결과 출력/저장만 담당. 필터링 로직은 모른다.
-- **`core/pipeline.py`**: 오케스트레이터. loader의 raw 데이터를 `StockProfile`로 감싸고, stage1~5를 순차 실행하며 탈락 종목을 걸러내는 깔때기(N → M → K → ...) 로직을 담당. `backtest/forward_return.py`에서도 재사용 가능해야 하므로 stage 로직과 분리 유지. **계산 로직 0줄 원칙** — 조건문(`if roe > ...` 등)이 들어간다면 stage로 옮겨야 한다는 신호. **(구현 완료)** 실제 구현에서도 조건문·계산 로직 없이 각 stage 인스턴스를 순차 호출해 데이터프레임만 전달하는 순수 흐름 제어기로 확인됨. 탈락 종목은 버리지 않고 단계별 통과 데이터프레임을 `history` 딕셔너리에 담아 최종 결과와 함께 반환.
+- **`core/pipeline.py`**: 오케스트레이터. loader의 raw 데이터를 `StockProfile`로 감싸고, stage1~5를 순차 실행하며 탈락 종목을 걸러내는 깔때기(N → M → K → ...) 로직을 담당. `backtest/forward_return.py`에서도 재사용 가능해야 하므로 stage 로직과 분리 유지. **계산 로직 0줄 원칙** — 조건문(`if roe > ...` 등)이 들어간다면 stage로 옮겨야 한다는 신호. **(구현 완료)** 실제 구현에서도 조건문·계산 로직 없이 각 stage 인스턴스를 순차 호출해 데이터프레임만 전달하는 순수 흐름 제어기로 확인됨. 단, 각 stage에서 계산된 새로운 지표(roe 등)가 다음 단계로 넘어갈 때 유실되지 않도록, 통과한 종목(ticker)을 기준으로 기존 데이터프레임과 새로운 데이터프레임을 안전하게 병합(Inner Merge)하여 상태를 누적·보존하는 책임을 가짐. 탈락 종목은 버리지 않고 단계별 통과 데이터프레임을 history 딕셔너리에 담아 최종 결과와 함께 반환.
 - **`stages/*.py`**: `StockProfile` 하나를 받아 지표를 계산하고 판정 결과만 반환하는 순수 함수 지향. 독립 테스트 용이성 확보.
 - **`core/schema.py`**: 파이프라인 전체를 관통하는 State Machine 데이터 규격. "언제 stage를 부를지"는 모르고 "상태를 어떻게 기록할지"만 안다.
 - **`core/metrics_utils.py`**: stage들이 공통으로 쓰는 순수 통계 함수 모음 (표준편차, 추세 판정 등). 특정 stage나 지표에 종속되지 않음.
@@ -123,7 +123,7 @@ PBR/BPS/PER은 DART 계정을 조합해 직접 계산하지 않고 **`pykrx.stoc
    - **BS(잔액) 항목은 차분 대상 아님** — `sj_div`로 분기해 BS는 스냅샷 그대로, IS/CF만 차분 적용.
 3. **추가 계정 매핑**: 자산총계, 부채총계, 자본총계, 이자비용 (부채비율/ROE/이자보상배율용) 반영 완료.
 4. **`get_quarterly_op_margin_series(ticker, base_date, n_quarters=8)`**: Stage2 `op_margin_std`(변동성) 계산용. TTM이 아닌 분기 **단독**값으로 반환, 결측 분기는 `float('nan')`으로 채움.
-5. **`get_quarterly_financials_series()`**: 분기별 재무 시계열을 묶어서 반환하는 범용 wrapper (Stage3/4의 YoY 비교용).
+5. **`get_quarterly_financials_series()`**: 분기별 재무 시계열을 묶어서 반환하는 범용 wrapper (Stage3/4의 YoY 비교용)[cite: 1]. 공시 시차(disclosure lag)로 인한 미래 분기 참조 오류(빈 데이터 반환)를 방지하기 위해, 실제 매출액 데이터가 존재하는 가장 최신 공시 분기를 동적으로 탐색하여 `t=0`으로 확정하는 로직이 적용됨.
 6. **`get_market_fundamental_cross_section(base_date)`**: pykrx `get_market_fundamental` 기반 point-in-time PBR/BPS/PER 스냅샷.
 
 ---
@@ -184,6 +184,7 @@ def compute_std(series: list[float], min_valid_points: int = 4) -> tuple[float, 
 - [x] `core/metrics_utils.py` 신설 및 `compute_std` 순수 함수 분리 완료
 - [x] `config/params.yaml` 설계 완료 (Stage 1~5 전체 파라미터 매핑)
 - [x] Stage 1~5 스크리너 클래스 독립 구현 완료
+- [x] 실 데이터를 활용한 전체 파이프라인 점검 필요 (완료: KOSPI 실전 데이터 연동 및 단계별 상태 누적 병합 로직 검증 완료)
 
 ### 남은 미결 항목
 - [ ] `op_margin_min_quarters` 기본값(4 vs 6) — 구현은 완료됐으나 값 자체는 백테스트로 튜닝 필요
@@ -191,4 +192,3 @@ def compute_std(series: list[float], min_valid_points: int = 4) -> tuple[float, 
 - [ ] Stage4의 PBR `NaN`/자본잠식 임시 구제 통과가 Stage5에서 실제로 재검증되는지 pipeline 흐름 확인
 - [ ] `backtest/forward_return.py` 구현 (아직 미착수)
 - [ ] `main.py` 실행 진입점 구현 (아직 미착수)
-- [ ] 실 데이터를 활용한 전체 파이프라인 점검 필요

@@ -77,6 +77,8 @@
 - QoQ 비교는 4분기 마케팅비 집중 등 계절성에 취약 → YoY 동분기 비교로 전환
 - 재고회전율 상승이 "효율화"가 아니라 "수요 위축에 따른 판매 부진(재고를 못 채움)"일 수 있음 → 매출 성장 동반 여부로 방향성 검증
 - 판관비만 줄고 GPM이 훼손되면 "제 살 깎기"식 비용절감 → GPM 동반 개선 조건으로 지속가능성 검증
+- 판관비 연속 감소 확인 기간(sga_lookback_quarters) 기준을 기존 6분기에서 4분기(최근 1년)로 완화합니다.
+- 실전 KOSPI 데이터 기반의 탈락률(Funnel) 분석 결과, 6분기 연속 비용 절감 및 매출 성장 조건은 전체 우량주의 90% 이상을 탈락시키는 과도한 허들(병목 현상)로 작용함이 확인되었습니다. 이에 따라 턴어라운드 확인 기간을 보다 현실적인 4분기(1년)로 조정합니다.
 
 **스키마 매핑**: `TurnaroundMetrics` (`sga_ratio_yoy_q1`, `sga_ratio_yoy_q2`, `is_sga_decreasing_consecutively`, `inventory_turnover_yoy`, `sales_growth_yoy`, `gpm_yoy`)
 
@@ -151,6 +153,7 @@
    - 각 stage 문서의 "업종 편차 주의" 절에 구체 태그명과 처리 정책(구제/면제/기계적 탈락)을 명시한다.
 4. **Look-ahead bias 방지**: 섹터 데이터의 기준일(`base_date`)이 종목 기준일보다 미래일 수 없도록 스키마 레벨에서 강제 (`inject_sector_info`의 `ValueError` 체크)
 5. **forward-return 백테스트로 사후 검증**: 각 단계의 임계치(percentile 컷, 통과 비율, 가중치 w1/w2 등)는 최종 확정값이 아니라 백테스트를 통해 지속적으로 튜닝되어야 함
+6. **단계별 지표 누적 및 의존성 보존**: 각 단계의 필터링은 이전 단계에서 산출된 핵심 지표를 페어(Pair) 검증에 적극 활용합니다. 예를 들어 4단계(밸류에이션)의 밸류트랩 검증(`is_pbr_value_trap`)은 2단계에서 계산된 roe 지표를 필수로 요구합니다. 따라서 파이프라인은 통과 종목을 걸러내는 것뿐만 아니라, 각 단계에서 계산된 새로운 지표들이 다음 단계로 누락 없이 병합(Merge)되어 전달되도록 상태를 보존해야 합니다.
 
 ---
 
@@ -171,3 +174,4 @@
 | 2026-07-28 | 최초 작성. 5단계 기준 및 개선 근거 정리 |
 | 2026-07-31 | 2단계 `op_margin_std` 계산 방식(분기 단독값 + metrics_utils) 명시. 4단계 `pbr`/`bps` 데이터 소스를 pykrx 기시산출값으로 확정, architecture.md 참조 링크 추가 |
 | 2026-07-31 | Stage 1~5 구현 완료에 따라 각 단계 `na_reasons` 태그명(`OP_MARGIN_STD_NOT_COMPUTABLE`, `TURNAROUND_NOT_COMPUTABLE`, `DATA_TOO_SHORT`, `is_pbr_value_trap`, `DEBT_RATIO_CAUTION` 등)과 구제(exempt)/면제/기계적 탈락 처리 정책 구체화. 공통 설계 원칙에 `NOT_COMPUTABLE` 처리 분기 기준(업종 특성 vs 데이터 부족) 추가 |
+2026-08-01 | 실전 KOSPI 데이터 Funnel 분석 결과 반영: 3단계 판관비율 확인 기간(sga_lookback_quarters)을 6분기에서 4분기로 완화. 공통 설계 원칙에 단계별 지표 누적 의존성(상태 보존) 항목 추가 |

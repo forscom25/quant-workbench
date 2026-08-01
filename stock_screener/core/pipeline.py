@@ -81,7 +81,8 @@ class QuantPipeline:
         # 2. Stage 2: 섹터 내 우량주 탐색
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 2: Sector Leaders")
-        passed_stage2_df = self.stage2.run(stage1_passed_tickers, self.loader, base_date)
+        stage2_raw = self.stage2.run(stage1_passed_tickers, self.loader, base_date)
+        passed_stage2_df = self._accumulate_results(stage1_passed_tickers, stage2_raw)
         history['stage2'] = passed_stage2_df
         
         if passed_stage2_df.empty:
@@ -92,7 +93,8 @@ class QuantPipeline:
         # 3. Stage 3: 체질 개선 (Turnaround)
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 3: Fundamental Improve")
-        passed_stage3_df = self.stage3.run(passed_stage2_df, self.loader, base_date)
+        stage3_raw = self.stage3.run(passed_stage2_df, self.loader, base_date)
+        passed_stage3_df = self._accumulate_results(passed_stage2_df, stage3_raw)
         history['stage3'] = passed_stage3_df
         
         if passed_stage3_df.empty:
@@ -103,7 +105,8 @@ class QuantPipeline:
         # 4. Stage 4: 밸류에이션
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 4: Valuation")
-        passed_stage4_df = self.stage4.run(passed_stage3_df, self.loader, base_date)
+        stage4_raw = self.stage4.run(passed_stage3_df, self.loader, base_date)
+        passed_stage4_df = self._accumulate_results(passed_stage3_df, stage4_raw)
         history['stage4'] = passed_stage4_df
         
         if passed_stage4_df.empty:
@@ -114,8 +117,8 @@ class QuantPipeline:
         # 5. Stage 5: 재무 건전성
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 5: Financial Health")
-        final_df = self.stage5.run(passed_stage4_df, self.loader, base_date)
-        history['stage5'] = final_df
+        stage5_raw = self.stage5.run(passed_stage4_df, self.loader, base_date)
+        final_df = self._accumulate_results(passed_stage4_df, stage5_raw)
         
         self.logger.info(f"========== [Pipeline End] Final Passed: {len(final_df)} ==========")
         
