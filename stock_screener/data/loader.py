@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import pandas as pd
+import numpy as np
 from pykrx import stock
 import FinanceDataReader as fdr
 import OpenDartReader
@@ -63,7 +64,7 @@ class QuantDataLoader:
             "sga": { # 판매비와관리비 (턴어라운드 핵심 지표)
                 "sj": "IS",
                 "ids": ["dart_SellingGeneralAdministrativeExpenses"],
-                "names": ["판매비와관리비", "판매비 및 일반관리비"]
+                "names": ['판매비와관리비', '판매비와 관리비', '판매비와일반관리비', '영업비용', "판매비 및 일반관리비"]
                 },
             "inventory": { # 재고자산 (재고회전율 계산용)
                 "sj": "BS",
@@ -548,6 +549,47 @@ class QuantDataLoader:
                 target_year -= 1
                 
         return financials_series
+
+    def extract_account_value(self, df, account_info, reprt_code):
+        """
+        확장된 키워드를 기반으로 계정 값을 안전하게 추출하고,
+        사업보고서(Q4)의 단독값 누락을 방어합니다.
+        """
+        matched_rows = df[
+            (df['sj_div'].isin(account_info['sj'])) & 
+            (df['account_nm'].str.contains('|'.join(account_info['names']), na=False))
+        ]
+        
+        if matched_rows.empty:
+            return np.nan
+            
+        row = matched_rows.iloc[0] # 가장 먼저 매칭된 표준 계정 사용
+        
+        # =====================================================================
+        # 🚨 [여기 추가!] 4분기(사업보고서) 방어 로직
+        # 단독값(add_amount)을 꺼내기 전에, 사업보고서인데 단독값이 비어있는지 먼저 검사
+        # =====================================================================
+        if reprt_code == '11011':  # 4분기 사업보고서인 경우
+            if 'thstrm_add_amount' not in row or pd.isna(row['thstrm_add_amount']) or str(row['thstrm_add_amount']).strip() == '':
+                # 4분기 단독값이 없으면, 아래의 기존 로직으로 내려가 누적치(amount)를 
+                # 억지로 쓰지 못하도록 여기서 원천 차단하고 결측(NaN) 처리합니다.
+                return float('nan') 
+        # =====================================================================
+        
+        # 2. 값 파싱 시도 (기존에 작성해두신 분기 단독값 판별 try-except 로직)
+        try:
+            # thstrm_add_amount 컬럼이 존재하고 값이 있으면 우선 사용
+            if 'thstrm_add_amount' in row and pd.notna(row['thstrm_add_amount']):
+                val = str(row['thstrm_add_amount']).replace(',', '').strip()
+                if val:
+                    return float(val)
+                    
+            # 위 방어 로직을 통과한 1~3분기 보고서 중 add_amount가 없는 경우 기본값 캐스팅
+            val = str(row['thstrm_amount']).replace(',', '').strip()
+            return float(val) if val else float('nan')
+            
+        except Exception as e:
+            return float('nan')
 
     def get_market_fundamental_cross_section(self, base_date: date) -> pd.DataFrame:
         """
