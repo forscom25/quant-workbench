@@ -35,33 +35,28 @@
 ### [결정] 탈락 종목 보존 정책
 - **확정**: 종목을 완전히 버리지 않고, `pipeline.py`에서 단계별 통과 데이터프레임을 `history` 딕셔너리에 담아 최종 결과와 함께 반환하는 방식 채택 (강제 폐기나 복잡한 상태 객체 대신 단순 딕셔너리 축적)
 - 사유: 사후 분석("이 종목이 왜 stage2에서 떨어졌는지") 및 디버깅 용이성 확보
-- → pipeline.py 구현 완료. architecture.md TODO 체크 및 "결정 대기 중" 항목 제거 필요
+- → pipeline.py 구현 완료. architecture.md 반영 완료
 
 ### [결정] DART 일일 호출량 관리
 - **확정**: `loader.py`에 `dart_daily_limit` 카운터 구현. 한도 도달 시 `RuntimeError`로 스크리닝 즉시 중단 (조용히 `NOT_COMPUTABLE`로 새는 대신 명시적으로 실패시켜 원인 파악 쉽게)
-- → loader.py 구현 완료. architecture.md "알려진 한계" 표에서 해당 행 제거 필요
+- → loader.py 구현 완료. architecture.md 반영 완료
 
 ### [결정] 통계 계산 표본 수 부족 처리
 - `op_margin_std` 등 계산 시 신규 상장주처럼 데이터가 부족한 경우, `metrics_utils.py`가 `NOT_COMPUTABLE` 상태를 부여
 - Stage 필터링 단계에서는 이를 예외(exempt) 조건으로 구제하여 억울한 탈락 방지 — 이 원칙은 다른 stage의 유사 케이스(`ROIC_NOT_COMPUTABLE` 등)에도 동일하게 적용됨
 - → screening_criteria.md 공통 설계 원칙(3-1) 및 각 stage 절 반영 완료
 
-### [진행 중] op_margin_min_quarters 기본값 미정
-- params.yaml에 넣을 최소 유효 분기 수 — 4로 할지 6으로 할지는 여전히 미확정, 백테스트 검증 필요 (구현은 완료되었으나 값 자체는 튜닝 대상)
-
-### [결정] 분기 단독값 판별 방식
-- 기존 `thstrm_nm` 텍스트 매칭("2분기", "3분기" 포함 여부)으로 누적/단독 판별 시도 → 보고서마다 문구 표기가 달라 신뢰 불가, 실제로 이중 차감 버그 발생 확인
-- **확정**: `thstrm_add_amount` 컬럼 존재 여부를 우선 확인하고, 없으면 `thstrm_amount`를 기본값으로 캐스팅하는 try-except 구조로 `loader.py` 정제 로직 반영 완료
-- ⚠️ **검증 필요**: `thstrm_add_amount`와 `thstrm_amount` 중 어느 쪽이 "누적"이고 어느 쪽이 "단독(3개월)"인지는 계정·보고서 종류에 따라 달라질 수 있음. 지난번 `thstrm_nm` 버그도 "이럴 것이다"라는 가정에서 시작됐던 만큼, 실제 raw 응답 샘플(반기·3분기 보고서의 매출액 등)로 두 컬럼 값을 직접 대조해 방향을 재확인해두는 걸 권장
-- **관련**: BS(잔액) 항목은 애초에 차분 대상이 아님 — `sj_div`로 분기해서 BS는 스냅샷 그대로, IS/CF만 차분 적용
-- → loader.py 구현 완료. architecture.md의 "구현 중 발견된 버그" 서술을 확정된 처리방식으로 갱신 필요
+### [결정] 분기 단독값 판별 및 차분(Isolation) 방식
+- DART의 IS/CF(손익/현금흐름) 누적치 특성을 고려, 매 분기 누적치를 조달한 뒤 직전 분기 누적치를 차감하여 단독 분기값을 산출하는 방식을 원칙으로 확정. 
+- (단, BS(재무상태표) 항목은 스냅샷이므로 차분 제외)
+- ⚠️ **검증 완료**: 삼성전자 샘플 대조를 통해 누적/단독값 파싱 로직 및 차분 계산 정합성 완벽히 검증됨.
+- → loader.py 구현 완료. architecture.md 반영 완료
 
 ## 2026-08-01
 
 ### [결정] 파이프라인 상태 누적(Accumulation) 로직 확정
 - **이슈**: Stage 4에서 밸류트랩 검증 시, Stage 2에서 계산된 `roe`가 유실되어 `KeyError`가 발생하는 현상 확인.
 - **해결**: `pipeline.py`에 `_accumulate_results` 메서드를 신설. 각 stage에서 산출된 새로운 지표들을 `ticker` 기준으로 병합(Inner Merge)하여 다음 단계로 넘겨주도록 확정. 
-- **효과**: 기존의 탈락 종목을 `history` 딕셔너리에 담아 축적하는 방식과 시너지를 내어 완벽한 데이터 추적 가능.
 - → `architecture.md` 및 `screening_criteria.md` 반영 완료
 
 ### [결정] 공시 시차(Disclosure Lag) 동적 탐색 도입
@@ -69,15 +64,23 @@
 - **해결**: `loader.py`의 `get_quarterly_financials_series` 메서드가 DART API를 호출하여 실제 매출액 데이터가 존재하는 가장 최신 분기를 동적으로 탐색하고, 이를 `t=0` 기점으로 확정하도록 로직 개선.
 - → `architecture.md` 반영 완료
 
-### [결정] 스크리닝 파라미터 현실화 (Funnel 분석 반영)
-- **이슈**: 실전 KOSPI 전체 종목 대상 테스트 결과, Stage 3(체질 개선)에서 90% 이상의 종목이 기계적 탈락하는 심각한 병목 현상 발견.
-- **해결**: 판관비율 연속 감소 조건(`sga_lookback_quarters`)을 기존 6분기에서 4분기(1년)로 완화. GPM 및 재고 조건은 시장 상황에 따라 유연하게 튜닝할 수 있도록 조정.
-- → `screening_criteria.md` 반영 완료
-
 ## 2026-08-02
 
-### [진행 중] Stage 3 대량 탈락(90.7%) 원인 디버깅
-- **현상**: Stage 3(체질 개선)에서 우량주 대부분이 탈락하는 병목 발생. 
-- **조치**: 파라미터(`sga_lookback_quarters`)를 6에서 4로 임시 완화했으나 드롭률에 큰 변화 없음.
-- **분석**: "기준의 엄격함"이 아닌 `loader.py`의 DART API 분기 단독값(`thstrm_add_amount`) 차분 로직 결함에 의한 데이터 오염(음수 발생 등) 가능성이 제기됨.
-- **향후 계획**: 5~10개 샘플 종목의 Raw Data를 추출하여 누적/단독값 파싱 버그 여부 우선 진단. 근본 원인 해결 후 룩백(Lookback) 분기 수 원복 검토 예정.
+### [결정] 백테스트 엔진(forward_return.py) 검증 완료
+- **진행**: T+1 진입 및 슬리피지/수수료가 반영된 `BacktestEngine` 설계 및 단일 시점(2023-06, 2023-09) 구동 테스트 완료.
+- **결과**: `KS11`(코스피) 벤치마크 수익률 정상 산출 및 포트폴리오 수익률 기록 로직 검증 완료. 자산(Capital) 추적 로직은 순수 알파 추적을 위해 엔진에서 제거함.
+- → backtest/forward_return.py 구현 완료. architecture.md 반영 완료
+
+## 2026-08-03
+
+### [결정] Stage 3 & 4 아키텍처 전면 개편 (Composite Score 도입)
+- **이슈**: 다중 시점 백테스트(23.03, 23.06) 수행 결과, Stage 3(92% 탈락)와 Stage 4(100% 탈락)에서 극심한 병목 현상이 반복됨을 확인. 
+- **원인**: 기존의 이진(Boolean) 방식의 절대 컷오프(Hard Cut)가 시장 체제 변화에 유연하게 대응하지 못해 유망 성장주들을 과도하게 누락시킴. (분석 결과 `loader.py`의 차분 버그가 아님이 증명됨)
+- **해결책**:
+  1. Stage 3와 4의 필터링 로직을 절대 컷오프에서 **Z-score 기반의 가중 합산 점수(Composite Score)** 산출 방식으로 전면 교체.
+  2. 임계치 미달(매출 역성장, 밸류 트랩 등)로 인한 무조건적인 탈락을 폐지하고, `is_cost_cutting_warning`, `is_pbr_value_trap` 형태의 경고 태그(Tag)만 부여.
+  3. 공통 산출 로직(`calc_zscore`, `compute_composite_score`, `apply_percentile_filter`)을 `core/metrics_utils.py`로 추상화하여 코드 재사용성 극대화.
+- → stage3, stage4, metrics_utils.py 개편 완료. architecture.md 및 params.yaml 반영 완료
+
+### [진행 중] 스크리닝 파라미터(Percentile) 완화 튜닝
+- 단일 종목(삼천리) 생존으로 엔진 검증은 마쳤으나, 분산 투자를 위한 포트폴리오(10~20개 종목) 구성을 위해 Stage 3, 4의 `composite_pass_percentile`을 30%에서 50% 수준으로 완화하여 백테스트 재구동 및 튜닝 진행 예정.

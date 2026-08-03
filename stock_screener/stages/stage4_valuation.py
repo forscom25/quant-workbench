@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 from dateutil.relativedelta import relativedelta
+from core.metrics_utils import calc_zscore, compute_composite_score, apply_percentile_filter
 
 class ValuationScreener:
     """
@@ -10,58 +11,62 @@ class ValuationScreener:
     정당한 저평가(Value Trap)와 기회인 저평가를 구분합니다.
     """
     def __init__(self, params: dict):
-        self.pbr_cutoff = params.get('pbr_percentile_cutoff', 0.5)
-        self.bps_growth_min = params.get('bps_growth_yoy_min', 0.0)
-        self.roe_trap_threshold = params.get('roe_value_trap_threshold', 0.05)
+        # [수정] YAML에서 받아올 가중치 및 통과 기준
+        self.pbr_weight = params.get('pbr_weight', 0.5)
+        self.bps_weight = params.get('bps_growth_weight', 0.5)
+        self.pass_percentile = params.get('composite_pass_percentile', 0.3)
+        self.trap_roe_threshold = params.get('value_trap_roe_threshold', 0.05)
         
         self.logger = logging.getLogger(__name__)
 
     def run(self, input_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
-        """
-        input_df: 이전 단계를 통과한 종목 정보 (ticker, sector, 그리고 stage2에서 계산된 'roe' 포함 필수)
-        """
-        # 1. pykrx 원자료 조달 (현재 시점 및 1년 전 시점)
+        if input_df.empty: return input_df
+
         date_1y_ago = base_date - relativedelta(years=1)
-        
         fund_t0 = loader.get_market_fundamental_cross_section(base_date)
         fund_t4 = loader.get_market_fundamental_cross_section(date_1y_ago)
         
-        # 1년 전 BPS 컬럼명 변경 (병합을 위해)
         fund_t4 = fund_t4[['ticker', 'bps']].rename(columns={'bps': 'bps_1y_ago'})
         
-        # 데이터 병합 (입력 df + 현재 펀더멘털 + 과거 펀더멘털)
         df = pd.merge(input_df, fund_t0, on='ticker', how='left')
         df = pd.merge(df, fund_t4, on='ticker', how='left')
-        
-        na_reasons = []
 
-        # 2. BPS Growth YoY 계산
-        # 0으로 나누는 것을 방지
         df['bps_growth_yoy'] = np.where(
             (pd.notna(df['bps'])) & (pd.notna(df['bps_1y_ago'])) & (df['bps_1y_ago'] != 0),
             (df['bps'] - df['bps_1y_ago']) / np.abs(df['bps_1y_ago']),
             np.nan
         )
 
-        # 3. 섹터 내 PBR 상대 순위(Percentile) 계산
-        # PBR은 낮을수록 좋으므로 오름차순으로 순위를 매김
-        df['pbr_rank'] = df.groupby('sector')['pbr'].rank(pct=True, ascending=True)
-
-        # 4. 밸류트랩(Value Trap) 감지 로직
-        # PBR이 섹터 내 하위 50%로 낮지만, ROE도 기준치(예: 5%) 미만으로 형편없는 경우
-        df['is_pbr_value_trap'] = (df['pbr_rank'] <= self.pbr_cutoff) & (df['roe'] < self.roe_trap_threshold)
-
-        # 5. 필터링 조건 적용
-        # 조건 1: PBR이 일정 순위 이내일 것 (또는 자본잠식으로 PBR이 잡히지 않는 경우 예외 처리)
-        cond_pbr = df['pbr_rank'] <= self.pbr_cutoff
-        cond_pbr_exempt = df['pbr'].isna() | (df['pbr'] <= 0) # 자본잠식 종목 (우선 통과시키고 5단계에서 거름)
+        # ---------------------------------------------------------
+        # 3. Composite Score 스코어링 및 필터링
+        # ---------------------------------------------------------
+        # PBR 역수 처리 (자본잠식, 0 이하 값 처리)
+        safe_pbr = df['pbr'].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
+        df['pbr_inv_z'] = calc_zscore(1 / safe_pbr)
+        df['bps_z'] = calc_zscore(df['bps_growth_yoy'])
         
-        # 조건 2: BPS가 전년 대비 훼손되지 않았을 것 (빅배스/손상차손 등 장부가치 하락 방어)
-        cond_bps = df['bps_growth_yoy'] >= self.bps_growth_min
-        
-        passed_df = df[(cond_pbr | cond_pbr_exempt) & cond_bps].copy()
+        weights = {'pbr_inv_z': self.pbr_weight, 'bps_z': self.bps_weight}
+        df['stage4_score'] = compute_composite_score(df, weights)
 
-        self.logger.info(f"[Stage 4] {len(df)}개 종목 중 {len(passed_df)}개 저평가 종목 통과")
+        # 밸류 트랩 경고 태그 (탈락이 아님)
+        df['is_pbr_value_trap'] = (df['pbr_inv_z'] > 0) & (df['roe'] < self.trap_roe_threshold)
+
+        # 자본잠식 등 PBR 결측치 구제 대상 마킹
+        is_exempt = df['pbr'].isna() | (df['pbr'] <= 0)
+        df.loc[is_exempt, 'stage4_score'] = np.nan
+
+        # 퍼센타일 컷오프 (결측치 구제 포함)
+        passed_df, _ = apply_percentile_filter(df, 'stage4_score', self.pass_percentile)
         
-        schema_columns = ['ticker', 'sector', 'pbr', 'bps_growth_yoy', 'is_pbr_value_trap']
-        return passed_df[schema_columns]
+        # Status 로깅
+        passed_df.loc[passed_df['stage4_score'].isna(), 'stage4_status'] = 'EXEMPT'
+        passed_df.loc[passed_df['stage4_score'].notna(), 'stage4_status'] = 'PASSED'
+
+        self.logger.info(f"[Stage 4] {len(df)}개 종목 중 {len(passed_df)}개 저평가 종목 통과 (상위 {self.pass_percentile*100}%)")
+        
+        # 반환 스키마 유지
+        schema_columns = ['ticker', 'sector', 'pbr', 'bps_growth_yoy', 'is_pbr_value_trap', 'stage4_status']
+        # 기존 input_df의 컬럼을 유실하지 않도록 컬럼 교집합 유지
+        final_cols = list(set(input_df.columns.tolist() + schema_columns))
+        
+        return passed_df[[c for c in final_cols if c in passed_df.columns]]

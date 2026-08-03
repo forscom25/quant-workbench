@@ -67,7 +67,6 @@ class QuantPipeline:
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 1: Neglected Sector")
         passed_sectors_df = self.stage1.run(sector_metrics_df)
-        history['stage1'] = passed_sectors_df
         
         if passed_sectors_df.empty:
             self.logger.warning("Stage 1에서 통과한 섹터가 없습니다. 파이프라인을 종료합니다.")
@@ -76,6 +75,8 @@ class QuantPipeline:
         # 통과한 섹터에 속하는 종목들만 유니버스에서 추출하여 Stage 2로 전달
         passed_sectors_list = passed_sectors_df['sector'].tolist()
         stage1_passed_tickers = universe_df[universe_df['sector'].isin(passed_sectors_list)].copy()
+
+        history['stage1'] = stage1_passed_tickers
         
         # ---------------------------------------------------------
         # 2. Stage 2: 섹터 내 우량주 탐색

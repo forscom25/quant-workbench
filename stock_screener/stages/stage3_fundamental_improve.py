@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
+from core.metrics_utils import calc_zscore, compute_composite_score, apply_percentile_filter
 
 class FundamentalImproveScreener:
     """
@@ -10,9 +11,13 @@ class FundamentalImproveScreener:
     """
     def __init__(self, params: dict):
         self.lookback_q = params.get('sga_lookback_quarters', 6)
-        self.req_sales_growth = params.get('require_sales_growth', True)
-        self.req_gpm_up = params.get('require_gpm_improvement', True)
-        self.req_inv_up = params.get('require_inventory_turnover_up', True)
+
+        # [수정] YAML에서 받아올 가중치 및 통과 기준
+        self.sales_weight = params.get('sales_weight', 0.4)
+        self.sga_weight = params.get('sga_weight', 0.4)
+        self.gpm_weight = params.get('gpm_weight', 0.2)
+        self.pass_percentile = params.get('composite_pass_percentile', 0.3)
+        self.sales_decline_threshold = params.get('cost_cutting_only_sales_decline_threshold', -0.05)
         
         self.logger = logging.getLogger(__name__)
 
@@ -23,105 +28,82 @@ class FundamentalImproveScreener:
             ticker = row['ticker']
             sector = row['sector']
             
-            # 1. 시계열 원자료 조달 (인덱스 0: 최근 분기, 1: 직전 분기, 4: 전년동기, 5: 직전분기의 전년동기)
+            # 1. 시계열 원자료 조달
             q_series = loader.get_quarterly_financials_series(ticker, base_date, n_quarters=self.lookback_q)
             
             na_reasons = []
             
-            # 데이터 부족 시 처리
             if len(q_series) < 6 or all(pd.isna(q_series[0].get('revenue', np.nan)) for _ in range(6)):
                 na_reasons.append("DATA_TOO_SHORT")
                 metrics_data.append({
-                    'ticker': ticker,
-                    'sector': sector,
-                    'sga_ratio_yoy_q1': np.nan,
-                    'sga_ratio_yoy_q2': np.nan,
-                    'is_sga_decreasing_consecutively': False,  # 데이터 없으면 무조건 False(탈락)
-                    'sales_growth_yoy': np.nan,
-                    'inventory_turnover_yoy': np.nan,
-                    'gpm_yoy': np.nan,
+                    'ticker': ticker, 'sector': sector,
+                    'sga_yoy_avg': np.nan, 'sales_growth_yoy': np.nan, 'gpm_yoy': np.nan,
                     'na_reasons': ",".join(na_reasons)
                 })
                 continue
 
-            # 2. 지표 계산 함수 (안전한 나눗셈)
             def safe_div(n, d):
                 return np.divide(n, d) if pd.notna(n) and pd.notna(d) and d != 0 else np.nan
 
-            # --- 판관비율 (SGA Ratio) ---
-            sga_ratio_t0 = safe_div(q_series[0].get('sga'), q_series[0].get('revenue'))
-            sga_ratio_t4 = safe_div(q_series[4].get('sga'), q_series[4].get('revenue'))
-            sga_ratio_t1 = safe_div(q_series[1].get('sga'), q_series[1].get('revenue'))
-            sga_ratio_t5 = safe_div(q_series[5].get('sga'), q_series[5].get('revenue'))
-
-            sga_ratio_yoy_q1 = sga_ratio_t0 - sga_ratio_t4 # 최근 분기 판관비율 YoY
-            sga_ratio_yoy_q2 = sga_ratio_t1 - sga_ratio_t5 # 직전 분기 판관비율 YoY
-            is_sga_dec_consecutively = (sga_ratio_yoy_q1 < 0) and (sga_ratio_yoy_q2 < 0)
+            # --- 판관비액 (SGA) ---
+            # [수정] 단순 비율(Ratio) 감소 연속성이 아닌, 2개 분기 판관비 '증감률'의 평균 사용
+            sga_t0 = q_series[0].get('sga')
+            sga_t4 = q_series[4].get('sga')
+            sga_t1 = q_series[1].get('sga')
+            sga_t5 = q_series[5].get('sga')
+            
+            sga_yoy_q1 = safe_div(sga_t0 - sga_t4, abs(sga_t4)) if pd.notna(sga_t4) else np.nan
+            sga_yoy_q2 = safe_div(sga_t1 - sga_t5, abs(sga_t5)) if pd.notna(sga_t5) else np.nan
+            sga_yoy_avg = np.nanmean([sga_yoy_q1, sga_yoy_q2]) if pd.notna(sga_yoy_q1) or pd.notna(sga_yoy_q2) else np.nan
 
             # --- 매출액 성장률 (Sales Growth YoY) ---
             rev_t0 = q_series[0].get('revenue', np.nan)
             rev_t4 = q_series[4].get('revenue', np.nan)
             sales_growth_yoy = safe_div(rev_t0 - rev_t4, abs(rev_t4))
 
-            # --- 재고회전율 (Inventory Turnover) 및 매출총이익률 (GPM) ---
-            inv_t0 = q_series[0].get('inventory', np.nan)
+            # --- 매출총이익률 (GPM) ---
             gp_t0 = q_series[0].get('gross_profit', np.nan)
-            
-            # 금융업 등 재고나 매출원가(GPM) 개념이 없는 업종 태깅
-            if pd.isna(inv_t0) or pd.isna(gp_t0):
+            if pd.isna(gp_t0):
                 na_reasons.append("TURNAROUND_NOT_COMPUTABLE")
             
-            inv_turnover_t0 = safe_div(rev_t0, inv_t0)
-            inv_turnover_t4 = safe_div(rev_t4, q_series[4].get('inventory', np.nan))
-            inventory_turnover_yoy = inv_turnover_t0 - inv_turnover_t4
-
             gpm_t0 = safe_div(gp_t0, rev_t0)
             gpm_t4 = safe_div(q_series[4].get('gross_profit', np.nan), rev_t4)
             gpm_yoy = gpm_t0 - gpm_t4
 
-            # 지주사 등 특정 섹터 주의 태깅 (매출 성장 해석 주의)
-            if '지주' in str(sector):
-                na_reasons.append("SALES_GROWTH_CAUTION")
-
             metrics_data.append({
-                'ticker': ticker,
-                'sector': sector,
-                'sga_ratio_yoy_q1': sga_ratio_yoy_q1,
-                'sga_ratio_yoy_q2': sga_ratio_yoy_q2,
-                'is_sga_decreasing_consecutively': is_sga_dec_consecutively,
+                'ticker': ticker, 'sector': sector,
+                'sga_yoy_avg': sga_yoy_avg,
                 'sales_growth_yoy': sales_growth_yoy,
-                'inventory_turnover_yoy': inventory_turnover_yoy,
                 'gpm_yoy': gpm_yoy,
                 'na_reasons': ",".join(na_reasons)
             })
 
         df = pd.DataFrame(metrics_data)
+        if df.empty: return df
 
         # ---------------------------------------------------------
-        # 3. 필터링 조건 적용
+        # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------
-        # 기본 조건: 2개 분기 연속 판관비율 YoY 감소
-        cond_sga = df['is_sga_decreasing_consecutively'] == True
-
-        # 선택 조건: 매출 성장
-        cond_sales = (df['sales_growth_yoy'] > 0) if self.req_sales_growth else True
+        df['sales_z'] = calc_zscore(df['sales_growth_yoy'])
+        df['sga_inv_z'] = calc_zscore(-df['sga_yoy_avg']) # 판관비 증가는 나쁘므로 부호 반전
+        df['gpm_z'] = calc_zscore(df['gpm_yoy'])
         
-        # 선택 조건: 재고회전율 개선 (증가)
-        cond_inv = (df['inventory_turnover_yoy'] > 0) if self.req_inv_up else True
+        weights = {'sales_z': self.sales_weight, 'sga_inv_z': self.sga_weight, 'gpm_z': self.gpm_weight}
+        df['stage3_score'] = compute_composite_score(df, weights)
         
-        # 선택 조건: GPM 유지/개선 (하락폭이 0 이상)
-        cond_gpm = (df['gpm_yoy'] >= 0) if self.req_gpm_up else True
-
-        # 예외 처리: 금융업 등 계산 불가 업종은 해당 지표 필터링 면제 (Pass)
-        cond_exempt = df['na_reasons'].astype(str).str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
-
-        passed_df = df[
-            cond_sga & 
-            (cond_sales | cond_exempt) & 
-            (cond_inv | cond_exempt) & 
-            (cond_gpm | cond_exempt)
-        ].copy()
-
-        self.logger.info(f"[Stage 3] {len(df)}개 종목 중 {len(passed_df)}개 턴어라운드 종목 통과")
+        # 구제 대상 태깅 (NOT_COMPUTABLE)
+        is_exempt = df['na_reasons'].astype(str).str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
+        df.loc[is_exempt, 'stage3_score'] = np.nan
         
+        # 경고 태그 (매출 역성장)
+        df['is_cost_cutting_warning'] = df['sales_growth_yoy'] <= self.sales_decline_threshold
+        
+        # 퍼센타일 컷오프 (결측치 구제 포함)
+        passed_df, _ = apply_percentile_filter(df, 'stage3_score', self.pass_percentile)
+        
+        # Status 로깅 (선택적)
+        passed_df.loc[passed_df['stage3_score'].isna(), 'stage3_status'] = 'EXEMPT'
+        passed_df.loc[passed_df['stage3_score'].notna(), 'stage3_status'] = 'PASSED'
+
+        self.logger.info(f"[Stage 3] {len(df)}개 종목 중 {len(passed_df)}개 턴어라운드 종목 통과 (상위 {self.pass_percentile*100}%)")
         return passed_df

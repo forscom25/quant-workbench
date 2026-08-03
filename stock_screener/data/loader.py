@@ -54,7 +54,7 @@ class QuantDataLoader:
             "cogs": { # 매출원가 (매출총이익률 GPM 계산용)
                 "sj": "IS",
                 "ids": ["ifrs-full_CostOfSales"],
-                "names": ["매출원가", "영업비용"]
+                "names": ["매출원가"]
                 },
             "gross_profit": { # 매출총이익
                 "sj": "IS",
@@ -64,7 +64,7 @@ class QuantDataLoader:
             "sga": { # 판매비와관리비 (턴어라운드 핵심 지표)
                 "sj": "IS",
                 "ids": ["dart_SellingGeneralAdministrativeExpenses"],
-                "names": ['판매비와관리비', '판매비와 관리비', '판매비와일반관리비', '영업비용', "판매비 및 일반관리비"]
+                "names": ["판매비와관리비", "판매비와 관리비", "판매비와일반관리비", "판매비 및 일반관리비", "판매관리비"]
                 },
             "inventory": { # 재고자산 (재고회전율 계산용)
                 "sj": "BS",
