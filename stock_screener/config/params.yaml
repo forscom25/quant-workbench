@@ -34,7 +34,8 @@ stage4_valuation:
   composite_pass_percentile: 0.3     # 합산 점수 상위 30% 통과
   value_trap_roe_threshold: 0.05     # 밸류트랩 경고 태그용 ROE 임계치 (5% 미만 시 태그)
 
-# 5단계: 재무 건전성 기반 최종 필터링
+# 5단계: 재무 건전성 기반 최종 필터링 (Composite Score 방식)
 stage5_financial_health:
-  debt_ratio_percentile_cutoff: 0.5  # 섹터 내 부채비율 하위 50% (부채비율이 낮을수록 통과)
-  interest_coverage_min: 1.5         # 최소 이자보상배율 (영업이익이 이자비용의 1.5배 이상)
+  icr_weight: 0.7                    # 이자보상배율 Z-score 가중치 (상환 능력 최우선)
+  debt_weight: 0.3                   # 부채비율(역수) Z-score 가중치
+  stage5_cutoff_quantile: 0.2        # 합산 점수 하위 20% 컷오프 (상위 80% 통과)

@@ -1,60 +1,55 @@
 import pandas as pd
 import numpy as np
 import logging
+from core import metrics_utils
 
 class FinancialHealthScreener:
     """
-    5단계: 재무 건전성
-    상환 능력(이자보상배율)과 이익의 질(현금흐름)을 확인하여 
-    안정적으로 사업을 영위할 수 있는 종목인지 최종 검증합니다.
+    5단계: 재무 건전성 
+    metrics_utils의 순수 통계 함수를 활용하여 Z-score 스코어링 및 상대평가를 진행합니다.
+    결격 사유는 Warning Tag로 관리하여 우량 성장주의 억울한 탈락을 방지합니다.
     """
     def __init__(self, params: dict):
-        self.debt_ratio_cutoff = params.get('debt_ratio_percentile_cutoff', 0.5)
-        self.icr_min = params.get('interest_coverage_min', 1.5)
+        # YAML 파라미터 매핑
+        self.cutoff_quantile = params.get('stage5_cutoff_quantile', 0.2)
+        self.icr_weight = params.get('icr_weight', 0.7)
+        self.debt_weight = params.get('debt_weight', 0.3)
         
         self.logger = logging.getLogger(__name__)
 
     def run(self, input_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
-        """
-        input_df: 4단계를 통과한 종목 정보 (ticker, sector 등 포함)
-        """
+        if input_df.empty: return input_df
+
         metrics_data = []
 
-        # 1. 원자료 조달 및 재무 건전성 지표 계산
+        # 1. 원자료 조달 및 Raw 지표 계산
         for _, row in input_df.iterrows():
             ticker = row['ticker']
-            sector = row['sector']
-
-            # TTM 재무 데이터 호출 (Flow는 합산, Stock은 스냅샷)
+            sector = row.get('sector', 'N/A')
             raw_ttm = loader.get_ttm_financials(ticker, base_date)
 
-            # --- 부채비율 계산 (총부채 / 총자본) ---
             total_liab = raw_ttm.get('total_liabilities', np.nan)
             total_equity = raw_ttm.get('total_equity', np.nan)
             debt_ratio = np.divide(total_liab, total_equity) if pd.notna(total_liab) and pd.notna(total_equity) else np.nan
 
-            # --- 현금흐름 및 이익 품질 계산 ---
             ocf = raw_ttm.get('operating_cash_flow', np.nan)
             ni = raw_ttm.get('net_income', np.nan)
 
-            # --- 이자보상배율 계산 ---
             op_inc = raw_ttm.get('operating_income', np.nan)
             int_exp = raw_ttm.get('interest_expense', np.nan)
 
+            warning_tags = []
             na_reasons = []
             icr = np.nan
 
             if pd.notna(op_inc) and pd.notna(int_exp):
                 if int_exp <= 0:
-                    # 무차입 경영이거나 이자수익이 더 커서 이자비용이 0 이하인 경우
-                    # 상환 능력이 무한대(inf)인 초우량 상태로 간주
-                    icr = np.inf
+                    icr = 50.0  # Z-score 계산을 위해 상단 캡핑
                 else:
                     icr = np.divide(op_inc, int_exp)
 
-            # 금융업 특수성 태깅 (예수금 등이 부채로 잡혀 부채비율이 무의미함)
             if any(keyword in str(sector) for keyword in ['금융', '증권', '보험', '은행', '지주']):
-                na_reasons.append("DEBT_RATIO_CAUTION")
+                na_reasons.append(metrics_utils.MetricStatus.CAUTION)
 
             metrics_data.append({
                 'ticker': ticker,
@@ -63,34 +58,57 @@ class FinancialHealthScreener:
                 'ocf': ocf,
                 'net_income': ni,
                 'interest_coverage_ratio': icr,
-                'na_reasons': ",".join(na_reasons)
+                'na_reasons': ",".join(na_reasons),
+                'warning_tags': ""
             })
 
         df = pd.DataFrame(metrics_data)
 
         # ---------------------------------------------------------
-        # 2. 섹터 내 부채비율 상대 순위 계산
+        # 2. Warning Tag 부착 (이상치 처리 및 로직 기반 태깅)
         # ---------------------------------------------------------
-        # 부채비율은 낮을수록 건전하므로 오름차순 랭킹 부여
-        df['debt_rank'] = df.groupby('sector')['debt_ratio'].rank(pct=True, ascending=True)
+        df['icr_capped'] = df['interest_coverage_ratio'].clip(lower=-10, upper=50)
+        df['debt_ratio_capped'] = df['debt_ratio'].clip(upper=5)
 
-        # ---------------------------------------------------------
-        # 3. 필터링 조건 적용
-        # ---------------------------------------------------------
-        # 조건 1: 부채비율이 섹터 내에서 일정 수준 이하일 것 (단, 금융업은 예외 통과)
-        cond_debt = df['debt_rank'] <= self.debt_ratio_cutoff
-        cond_debt_exempt = df['na_reasons'].astype(str).str.contains('DEBT_RATIO_CAUTION', na=False)
-
-        # 조건 2: OCF(영업활동현금흐름) 흑자이면서 당기순이익보다 클 것 (발생액 품질 검증)
-        # 당기순이익이 결측치인 경우 조건 비교 오류 방지를 위해 -inf로 채움
-        cond_ocf = (df['ocf'] > 0) & (df['ocf'] > df['net_income'].fillna(-np.inf))
-
-        # 조건 3: 이자보상배율이 기준치(예: 1.5배) 이상일 것
-        cond_icr = df['interest_coverage_ratio'] >= self.icr_min
-
-        passed_df = df[(cond_debt | cond_debt_exempt) & cond_ocf & cond_icr].copy()
-
-        self.logger.info(f"[Stage 5] {len(df)}개 종목 중 {len(passed_df)}개 재무 건전성 통과")
+        df.loc[df['interest_coverage_ratio'] < 1.0, 'warning_tags'] += "[ICR미달]"
+        df.loc[(df['ocf'] < df['net_income'].fillna(-np.inf)), 'warning_tags'] += "[이익질주의]"
         
-        schema_columns = ['ticker', 'sector', 'debt_ratio', 'ocf', 'net_income', 'interest_coverage_ratio', 'na_reasons']
-        return passed_df[schema_columns]
+        df['debt_rank_pct'] = df.groupby('sector')['debt_ratio'].rank(pct=True, ascending=True)
+        cond_not_finance = ~df['na_reasons'].astype(str).str.contains(metrics_utils.MetricStatus.CAUTION)
+        df.loc[cond_not_finance & (df['debt_rank_pct'] > 0.90), 'warning_tags'] += "[과다부채]"
+
+        # ---------------------------------------------------------
+        # 3. metrics_utils를 활용한 Z-score 및 합산 점수 계산
+        # ---------------------------------------------------------
+        df['debt_ratio_inv'] = -df['debt_ratio_capped']
+
+        df['icr_zscore'] = metrics_utils.calc_zscore(df['icr_capped'])
+        df['debt_zscore'] = metrics_utils.calc_zscore(df['debt_ratio_inv'])
+
+        # YAML 설정 가중치 적용
+        score_mapping = {'icr_zscore': self.icr_weight, 'debt_zscore': self.debt_weight}
+        df['stage5_score'] = metrics_utils.compute_composite_score(df, score_mapping)
+
+        cond_finance = df['na_reasons'].str.contains(metrics_utils.MetricStatus.CAUTION)
+        df.loc[cond_finance, 'stage5_score'] = df.loc[cond_finance, 'icr_zscore']
+
+        # ---------------------------------------------------------
+        # 4. 상대 평가 필터링 (하위 20% 탈락)
+        # ---------------------------------------------------------
+        top_percentile = 1.0 - self.cutoff_quantile 
+
+        if len(df) > 5:
+            passed_df, threshold = metrics_utils.apply_percentile_filter(df, 'stage5_score', top_percentile)
+        else:
+            passed_df = df.copy()
+            threshold = 0.0
+
+        self.logger.info(f"[Stage 5] {len(df)}개 중 {len(passed_df)}개 생존 (Threshold: {threshold:.3f})")
+        
+        # 이전 스테이지 데이터 보존
+        schema_columns = [
+            'ticker', 'sector', 'debt_ratio', 'ocf', 'net_income', 
+            'interest_coverage_ratio', 'stage5_score', 'warning_tags', 'na_reasons'
+        ]
+        final_cols = list(set(input_df.columns.tolist() + schema_columns))
+        return passed_df[[c for c in final_cols if c in passed_df.columns]]
