@@ -25,7 +25,11 @@ class QuantDataLoader:
         self.dart = OpenDartReader(self.dart_key)
         self.use_cache = use_cache
         self.cache_days = cache_days
-        self.cache_dir = Path("data/cache")
+
+        # 🚨 수정된 부분: loader.py 파일의 위치(data 폴더)를 기준으로 절대 경로 고정
+        base_dir = Path(__file__).resolve().parent
+        self.cache_dir = base_dir / "cache"
+
         if self.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)

@@ -2,6 +2,7 @@ import pandas as pd
 import logging
 from typing import Dict, Any, Tuple
 from datetime import date
+from core.schema import Stage
 
 # 구현된 5개 스테이지 임포트
 from stages.stage1_neglected_sector import NeglectedSectorScreener
@@ -44,9 +45,10 @@ class QuantPipeline:
         # 교집합인 ticker를 기준으로 inner merge (통과한 종목만 남으면서 이전 데이터 누적)
         return pd.merge(input_df, stage_result_df[cols_to_use], on='ticker', how='inner')
     
-    def run(self, base_date: date) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+    def run(self, base_date: date, stop_after: Stage | None = None) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
-        파이프라인을 실행합니다.
+        파이프라인을 순차적으로 실행합니다.
+        - stop_after: 지정된 Stage까지만 실행 후 결과를 조기 반환합니다. None일 경우 전체 실행.
         
         Returns:
             final_df (pd.DataFrame): 1~5단계를 모두 통과한 최종 종목 리스트
@@ -77,6 +79,10 @@ class QuantPipeline:
         stage1_passed_tickers = universe_df[universe_df['sector'].isin(passed_sectors_list)].copy()
 
         history['stage1'] = stage1_passed_tickers
+
+        # 🚨 [추가] Stage 1 이후 조기 종료
+        if stop_after is not None and stop_after == Stage.NEGLECTED_SECTOR:
+            return stage1_passed_tickers, history
         
         # ---------------------------------------------------------
         # 2. Stage 2: 섹터 내 우량주 탐색
@@ -89,6 +95,10 @@ class QuantPipeline:
         if passed_stage2_df.empty:
             self.logger.warning("Stage 2에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
+        
+        # 🚨 [추가] Stage 2 이후 조기 종료
+        if stop_after is not None and stop_after == Stage.SECTOR_LEADERS:
+            return passed_stage2_df, history
 
         # ---------------------------------------------------------
         # 3. Stage 3: 체질 개선 (Turnaround)
@@ -102,6 +112,10 @@ class QuantPipeline:
             self.logger.warning("Stage 3에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
 
+        # 🚨 [추가] Stage 3 이후 조기 종료
+        if stop_after is not None and stop_after == Stage.FUNDAMENTAL_IMPROVE:
+            return passed_stage3_df, history
+
         # ---------------------------------------------------------
         # 4. Stage 4: 밸류에이션
         # ---------------------------------------------------------
@@ -113,6 +127,10 @@ class QuantPipeline:
         if passed_stage4_df.empty:
             self.logger.warning("Stage 4에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
+
+        # 🚨 [추가] Stage 4 이후 조기 종료
+        if stop_after is not None and stop_after == Stage.VALUATION:
+            return passed_stage4_df, history
 
         # ---------------------------------------------------------
         # 5. Stage 5: 재무 건전성

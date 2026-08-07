@@ -21,16 +21,16 @@ stage2_sector_leaders:
 # 3단계: 재무 개선주 탐색 (Composite Score 방식)
 stage3_fundamental_improve:
   sga_lookback_quarters: 6                           # YoY 비교를 위해 최소 6개 분기(현재~5분기 전) 데이터 필요
-  sales_weight: 0.4                                  # 매출액 성장률 Z-score 가중치
-  sga_weight: 0.4                                    # 판관비 증감률(역수) Z-score 가중치
-  gpm_weight: 0.2                                    # GPM 증감률 Z-score 가중치
+  sales_weight: 0.6                                  # 매출액 성장률 Z-score 가중치
+  sga_weight: 0.1                                    # 판관비 증감률(역수) Z-score 가중치
+  gpm_weight: 0.3                                    # GPM 증감률 Z-score 가중치
   composite_pass_percentile: 0.3                     # 합산 점수 상위 30% 통과
   cost_cutting_only_sales_decline_threshold: -0.05   # 매출 역성장 경고 태그 임계치 (-5% 이하 시 태그)
 
 # 4단계: 밸류에이션 기반 저평가 탐색 (Composite Score 방식)
 stage4_valuation:
-  pbr_weight: 0.5                    # PBR(역수) Z-score 가중치
-  bps_growth_weight: 0.5             # BPS 성장률 Z-score 가중치
+  pbr_weight: 0.2                    # PBR(역수) Z-score 가중치
+  bps_growth_weight: 0.8             # BPS 성장률 Z-score 가중치
   composite_pass_percentile: 0.3     # 합산 점수 상위 30% 통과
   value_trap_roe_threshold: 0.05     # 밸류트랩 경고 태그용 ROE 임계치 (5% 미만 시 태그)
 

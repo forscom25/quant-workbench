@@ -15,18 +15,6 @@ class BacktestEngine:
         self.portfolio_log = []
         self.performance_log = []
 
-    def _get_quarterly_rebalance_dates(self, start_date: date, end_date: date) -> list[date]:
-        dates = []
-        curr_date = start_date
-        while curr_date <= end_date:
-            next_month = curr_date.replace(day=28) + timedelta(days=4)
-            last_day = next_month - timedelta(days=next_month.day)
-            
-            if last_day.month in [3, 6, 9, 12]:
-                dates.append(last_day)
-            curr_date = last_day + timedelta(days=1)
-        return sorted(list(set(dates)))
-
     def _get_period_return(self, ticker: str, start_date: date, end_date: date) -> float:
         # T+1 진입 로직 (기존과 동일하게 유지)
         df = self.loader.get_historical_ohlcv(ticker, start_date, end_date + timedelta(days=7))
@@ -58,13 +46,16 @@ class BacktestEngine:
 
         return (effective_sell / effective_buy) - 1
 
-    def run(self, start_date: date, end_date: date):
-        self.logger.info(f"🚀 시그널 검증 백테스트 시작: {start_date} ~ {end_date}")
-        rebalance_dates = self._get_quarterly_rebalance_dates(start_date, end_date)
+    def run(self, base_dates: list[date]):
+        if len(base_dates) < 2:
+            raise ValueError("백테스트를 위해서는 최소 2개 이상의 base_date가 필요합니다.")
         
-        for i in range(len(rebalance_dates) - 1):
-            t_date = rebalance_dates[i]
-            t_next_date = rebalance_dates[i+1]
+        self.logger.info(f"🚀 시그널 검증 백테스트 시작: {base_dates[0]} ~ {base_dates[-1]}")
+
+        # 외부에서 주입받은 base_dates를 그대로 순회
+        for i in range(len(base_dates) - 1):
+            t_date = base_dates[i]
+            t_next_date = base_dates[i+1]
             
             self.logger.info(f"🔄 스크리닝 시점 [ {t_date} ]")
             

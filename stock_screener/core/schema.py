@@ -1,19 +1,22 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import date, datetime
-from enum import Enum
+from enum import Enum, IntEnum
 
 # ==========================================
 # 1. 상태 및 메타데이터 열거형(Enum) 정의
 # ==========================================
 
-class Stage(Enum):
+class Stage(IntEnum):
+    """IntEnum으로 전환: 단계 간 순서 비교(<=, <, >) 가능
+    (pipeline.run(stop_after=...) 같은 부분 실행 기능에 필요)
+    각 멤버명은 stages/ 폴더의 파일명과 1:1로 맞춤"""
     PENDING = 0
-    NEGLECT_SECTOR = 1
-    QUALITY = 2
-    TURNAROUND = 3
-    VALUATION = 4
-    FINANCIAL_HEALTH = 5
+    NEGLECTED_SECTOR = 1      # stage1_neglected_sector.py
+    SECTOR_LEADERS = 2        # stage2_sector_leaders.py
+    FUNDAMENTAL_IMPROVE = 3   # stage3_fundamental_improve.py
+    VALUATION = 4             # stage4_valuation.py
+    FINANCIAL_HEALTH = 5      # stage5_financial_health.py
     COMPLETED = 6
 
 class Status(Enum):
@@ -56,35 +59,50 @@ class QualityMetrics:
     """2단계: 섹터 내 우량성 및 실적 안정성"""
     roe: float
     roic: float
-    op_margin_std: float 
+    op_margin_std: float
     na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
 
 @dataclass
 class TurnaroundMetrics:
-    """3단계: 체질 개선 및 시클리컬 지표"""
-    sga_ratio_yoy_q1: float  
-    sga_ratio_yoy_q2: float  
-    is_sga_decreasing_consecutively: bool 
-    
-    inventory_turnover_yoy: float
+    """3단계: 체질 개선 — Composite Score 기반 (2026-08-03 이진 컷오프 → Z-score 가중합산 전환)"""
+    sga_yoy_avg: float           # 판관비율 YoY 증감의 q1/q2 평균 (구 sga_ratio_yoy_q1/q2 통합)
     sales_growth_yoy: float
     gpm_yoy: float
+    stage3_score: float          # composite score 산출 결과
+    is_cost_cutting_warning: bool  # 매출 역성장 동반 시 경고 (탈락 아님)
+
+    # 구형 이진 컷오프 시절 필드 — composite score로 대체되어 삭제:
+    #   is_sga_decreasing_consecutively (완전 삭제, 복원 불필요)
+
+    # 재고회전율: 현재 필터 비활성(require_inventory_turnover_up=false)이나
+    # 알파 팩터로 재도입 가능성이 높아 Optional로 보존
+    inventory_turnover_yoy: Optional[float] = None
+
     na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
 
 @dataclass
 class ValuationMetrics:
-    """4단계: 밸류에이션"""
+    """4단계: 밸류에이션 — Composite Score 기반 (2026-08-03 전환)"""
     pbr: float
     bps_growth_yoy: float
+    stage4_score: float
+    is_pbr_value_trap: bool      # 저PBR+저ROE 경고 (탈락 아님)
     na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
 
 @dataclass
 class FinancialHealthMetrics:
-    """5단계: 재무 건전성 및 이익 품질"""
+    """5단계: 재무 건전성 — Composite Score 기반, Pool 상대평가 (2026-08-04 전환)"""
     debt_ratio: float
-    ocf: float               
+    ocf: float
     net_income: float
     interest_coverage_ratio: float
+    stage5_score: float
+
+    # warning_tags(비즈니스/퀀트 판단 경고)와 na_reasons(엔지니어링/데이터 상태)는
+    # 성격이 달라 의도적으로 분리 유지 — 관심사의 분리(SoC) 원칙
+    # 예: "[ICR미달]", "[과다부채]", "[이익질주의]"
+    warning_tags: list[str] = field(default_factory=list)
+
     na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
 
 # ==========================================
@@ -105,25 +123,30 @@ class BasicInfo:
 class StockProfile:
     """파이프라인 전체를 관통하는 메인 데이터 규격 (State Machine)"""
     info: BasicInfo
-    sector_info: Optional[SectorProfile] = None 
+    sector_info: Optional[SectorProfile] = None
     quality: Optional[QualityMetrics] = None
     turnaround: Optional[TurnaroundMetrics] = None
     valuation: Optional[ValuationMetrics] = None
     health: Optional[FinancialHealthMetrics] = None
-    
+
     # 이벤트 스트림 이력 관리
     history: list[StageEvent] = field(default_factory=list)
-    
+
     # 파이프라인 전체 탈락 사유 독립 보존 (추후 FailReason Enum 고도화 가능 지점)
     fail_reason: Optional[str] = None
-    
+
     # [명확화] 데이터 시차(Lag) 관리: 종목 기준일과 섹터 기준일의 차이
     sector_data_lag_days: Optional[int] = None
-    
+
     def __post_init__(self):
         """객체 생성 시 PENDING 상태를 이력의 첫 줄에 기록"""
         if not self.history:
             self._record_event(Stage.PENDING, Status.IN_PROGRESS)
+
+    @property
+    def current_stage(self) -> Stage:
+        """가장 최근 기록된 단계를 반환하는 편의 프로퍼티"""
+        return self.history[-1].stage if self.history else Stage.PENDING
 
     def _record_event(self, stage: Stage, status: Status):
         """내부 메서드: 상태 전이 이벤트를 로그에 Append"""
@@ -138,32 +161,34 @@ class StockProfile:
             )
         self.sector_info = sector_info
         self.sector_data_lag_days = (self.info.base_date - sector_info.base_date).days
-        
+
         # 하드코딩 제거: 현재 시점의 stage를 동적으로 추적하여 이벤트 기록
-        current_stage = self.history[-1].stage if self.history else Stage.PENDING
-        self._record_event(current_stage, Status.DATA_INJECTED)
+        self._record_event(self.current_stage, Status.DATA_INJECTED)
 
     def advance_stage(self, next_stage: Stage):
-        """현재 단계를 PASSED로 마감하고 다음 단계를 IN_PROGRESS로 시작"""
+        """현재 단계를 PASSED로 마감하고 다음 단계를 IN_PROGRESS로 시작.
+        이미 실격(FAILED) 처리된 종목은 다음 단계로 넘어갈 수 없도록 가드."""
+        if self.fail_reason is not None:
+            raise RuntimeError(
+                f"이미 실패 처리된 종목입니다 (사유: {self.fail_reason}). "
+                f"advance_stage()를 호출할 수 없습니다."
+            )
         if self.history:
-            current_stage = self.history[-1].stage
-            self._record_event(current_stage, Status.PASSED)
-        
+            self._record_event(self.current_stage, Status.PASSED)
+
         self._record_event(next_stage, Status.IN_PROGRESS)
 
     def mark_failed(self, reason: str):
         """현재 단계에서 탈락(FAILED) 처리 및 사유를 전용 필드에 저장"""
         if self.history:
-            current_stage = self.history[-1].stage
-            self._record_event(current_stage, Status.FAILED)
-        
+            self._record_event(self.current_stage, Status.FAILED)
+
         # MetricStatus(CAUTION) 오염 방지를 위해 전용 임시 필드 사용
         self.fail_reason = reason
 
     def mark_completed(self):
         """전체 파이프라인 종결"""
         if self.history:
-            current_stage = self.history[-1].stage
-            self._record_event(current_stage, Status.PASSED)
-            
+            self._record_event(self.current_stage, Status.PASSED)
+
         self._record_event(Stage.COMPLETED, Status.PASSED)

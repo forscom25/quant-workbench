@@ -18,3 +18,11 @@ __pycache__/
 *.csv
 *.xlsx
 *.parquet
+
+# --- 신규 추가 (데이터 파이프라인 및 백테스트 산출물) ---
+# 캐시 데이터 (DART 재무제표 등)
+data/.cache/
+data/cache/
+
+# 백테스트 결과 및 차트 산출물 (Git 추적 제외)
+outputs/

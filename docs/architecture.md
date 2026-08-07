@@ -25,10 +25,20 @@ stock_screener/
 │   └── metrics_utils.py    # 재사용 가능한 순수 통계 함수 (Z-score, 합산 등)
 ├── backtest/
 │   └── forward_return.py   # 각 단계별 신호 검증 및 포트폴리오 시뮬레이션
+│   └── cache_warmup.py     # 백테스트 전용 DART API 스마트 캐시 예열 스크립트
+├── analysis/               # [조회-읽기] 백테스트 산출물 분석 및 렌더링 (CQS 패턴)
+│   ├── stats.py            # 순수 계산: Sharpe, MDD, 승률, 누적 수익률 등
+│   └── visualize.py        # stats.py 결과를 차트로 렌더링
+├── outputs/                # 파생 산출물 저장 (Git 추적 제외)
+│   ├── charts/             # visualize.py가 생성한 이미지 파일
+│   ├── test_performance_log.csv
+│   └── test_portfolio_log.csv
 └── main.py                 # 최종 실행 진입점
 ```
 
 ## 2. 역할 분담 및 책임 경계
+
+### 2.1. 파이프라인 계층 분리
 
 판단 기준: "이 로직이 `params.yaml`의 값이 바뀌면 결과가 달라지는가?"
 
@@ -43,6 +53,17 @@ stock_screener/
 | 단계별 통과/탈락 종목 상태 이력(history) 관리 | ❌ | ✅ | ❌ |
 | Z-score 산출 및 퍼센타일 등 비율 계산 | ❌ | ❌ | ✅ (metrics_utils 호출) |
 | pass/fail 판정 및 구제(Exempt) 처리 | ❌ | ❌ | ✅ |
+
+### 2.2. 실행 및 분석 계층 분리 (CQS 패턴)
+
+명령-조회 분리(Command-Query Separation) 원칙에 따라 백테스트 실행과 분석 시각화를 엄격히 분리한다.
+
+| 구분 | backtest/ | analysis/ |
+| :--- | :---: | :---: | :---: |
+| loader / pipeline 호출 및 의존성 | ✅ | ❌ (절대 참조 금지) |
+| 산출물 결과 쓰기 (CSV 등 파일 생성) | ✅ | ❌ (읽기 전용) |
+| S성과 지표(Sharpe, MDD 등) 통계 연산 | ❌ | ✅ (stats.py) |
+| 차트 렌더링 (Matplotlib, Plotly) | ❌ | ✅ (visualize.py) |
 
 ## 3. 핵심 계산 규칙 (현재 확정)
 
