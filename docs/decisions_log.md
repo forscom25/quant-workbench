@@ -110,8 +110,8 @@
 
 ### [결정] 영업일 추출 로직 확정 (pykrx 버그 우회)
 - **이슈**: `pykrx` 라이브러리의 캘린더 함수(`get_business_days` 등) Deprecation 및 내부 타입 에러 버그, 그리고 휴일 보정 과정의 과도한 API 호출로 인한 서버 차단 문제 발생.
-- **해결책**: `run_backtest.py`의 분기말 기준일(`base_dates`) 생성 시, KOSPI(티커 "1001") 지수의 실제 시세 데이터를 조회하여 데이터가 존재하는 해당 월의 마지막 날짜(최종 거래일)를 직접 추출하는 우회 로직으로 확정.
-- → `run_backtest.py` 반영 완료.
+- **해결책**: 분기말 기준일(`base_dates`) 생성 시, KOSPI 지수의 실제 시세 데이터를 조회하여 데이터가 존재하는 가장 가까운 과거 거래일을 직접 추출하는 우회 로직으로 확정.
+- → `run_backtest.py` 반영 완료. **(2026-09-01 갱신: 이후 리팩터로 `loader.py`의 `get_quarterly_rebalance_dates`/`_get_nearest_past_bday`로 이관, 데이터 소스도 pykrx `get_index_ohlcv`에서 FinanceDataReader `KS11`로 교체됨. 최신 위치는 architecture.md §2.1 참고.)**
 
 ### [결정] 캐시 디렉토리 절대 경로 고정
 - **이슈**: 스크립트 실행 위치(터미널 루트)에 따라 캐시 폴더가 의도치 않은 곳에 생성되는 현상.
@@ -123,4 +123,18 @@
   - **Stage 3**: 단순 비용 절감보다 폭발적 외형 성장에 집중 (매출 0.6, GPM 0.3, 판관비 0.1)
   - **Stage 4**: 가치 함정 방지 및 장부가액의 복리 증식 극대화 (BPS 성장 0.8, PBR 0.2)
 - **보류 사항**: 파이프라인 통과 비율(상위 30%)은 우선 유지하기로 결정함. API 한도 초기화 후 백테스트를 돌려보고, 최종 생존 종목 수에 따라 허들 상향(예: 상위 20%로 압축) 여부를 추후 재평가할 예정.
-- → 가중치 비율 `params.yaml` 반영 예정. (컷오프 비율은 백테스트 확인 후 확정)
+- → 가중치 비율 `params.yaml` 반영 완료 (2026-09-01 확인: Stage3 매출0.6/판관비0.1/GPM0.3, Stage4 PBR0.2/BPS0.8로 이미 적용되어 있었음 — `architecture.md` §4 표가 예전 값(0.4/0.4/0.2, 0.5/0.5)으로 남아있던 것을 이번에 갱신). 컷오프 비율(상위 30%)은 여전히 미확정 상태로 유지.
+
+## 2026-09-01
+
+### [결정] 문서-구현 정합화 작업 (아키텍처 방향 정리)
+- **이슈**: "한 문제가 해결되면 새 워크스페이스를 열어 독립적으로 개발"하는 방식이 반복되며 `core/schema.py`가 여러 세션에 걸쳐 서로 다른 설계(클래스 기반 상태 머신 → DataFrame 스키마 계약)로 다시 쓰였고, 그 결과 Stage3/4만 새 패턴("탈락 종목을 `fail_reason` 컬럼으로 보존")으로 옮겨가고 Stage1/2/5는 옛 방식(탈락 시 row 자체를 드롭)에 머물러 파이프라인 내부에서 단계별로 설계가 갈라져 있었음. `docs/` 세 문서도 실제 구현과 상당 부분 어긋나 있었음(예: 한 번도 쓰인 적 없는 `StockProfile`/`inject_sector_info` 상태 머신을 "확정 설계"로 서술).
+- **해결책**:
+  1. `fail_reason` 컬럼 기반 탈락 종목 보존 패턴을 Stage1/2/5까지 전체 확장. Stage1은 섹터 단위 판정을 티커 단위로 전개하며 `SECTOR_NOT_QUALIFIED` 사유를 상속시킴. Stage2는 boolean AND 컷오프 결과를 `QUALITY_CUTOFF_NOT_MET`으로 태깅. Stage5는 기존 `apply_percentile_filter`(row 드롭)를 Stage3/4와 동일한 컷오프 태깅 방식으로 교체.
+  2. `pipeline._accumulate_results`가 이전 단계의 (항상 None인) `fail_reason`을 새 stage의 실제 판정값으로 덮어쓰지 않고 그대로 두던 버그를 발견 및 수정 — 고치지 않았다면 Stage1 이후 어떤 단계의 탈락 판정도 실제로 반영되지 않는 상태였음.
+  3. `core/metrics_utils.py`가 `core/schema.py`와 별도로 자체 `MetricStatus`를 정의하고 있던 것을 schema.py 것으로 통일. Stage5의 `MetricStatus.CAUTION`을 문자열 `join()`에 그대로 섞어 쓰던 잠재 버그(Enum화 시 TypeError 유발)를 리터럴 태그 문자열로 교체.
+  4. `Stage` enum에서 실제로 쓰이지 않던 `UNIVERSE`/`PRE_FILTER` 멤버 제거, 누락되어 있던 `STAGE5` 추가.
+  5. `ValuationMetrics`에 `per` 필드를 실제 값으로 채움(기존에는 pykrx 응답에 이미 들어있는 값을 로더가 버리고 있었음). `psr`은 별도 DART 조회가 필요한 신규 기능으로 판단해 스키마에서 제거하고 TODO로 이관.
+  6. `analysis/visualize.py`가 존재하지 않는 `mdd`/`cumulative_return` 컬럼을 직접 읽으려던 것을, `analysis/stats.py`의 `calc_mdd`/`calc_cumulative_returns`를 호출하도록 연결 — CQS 원칙(연산은 stats.py, 렌더링은 visualize.py)을 실제로 지키게 됨.
+  7. `main.py`(실전 스크리닝 진입점)는 현재 빈 파일 상태로 당장 착수하지 않기로 결정 — 아직 백테스트/파라미터 튜닝 단계이므로 우선순위 낮음.
+- → `core/schema.py`, `core/metrics_utils.py`, `core/pipeline.py`, `stages/*.py`, `data/loader.py`, `analysis/visualize.py` 반영 완료. `architecture.md`, `screening_criteria.md` 반영 완료.

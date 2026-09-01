@@ -119,13 +119,39 @@ class QuantDataLoader:
         mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
         return (datetime.now() - mtime).days < self.cache_days
 
+    def _get_nearest_past_bday(self, target_date: date) -> str:
+        """
+        주어진 target_date를 포함하여 가장 가까운 '과거'의 영업일(KOSPI 기준)을 찾아 
+        'YYYYMMDD' 문자열 형태로 반환합니다.
+        (pykrx 내부 캘린더 버그 방지 및 미래 정보 참조(Look-ahead bias) 원천 차단)
+        """
+        from dateutil.relativedelta import relativedelta
+        import FinanceDataReader as fdr
+        
+        # target_date 기준 과거 15일(긴 명절 연휴를 고려해 넉넉히) 데이터 조회
+        start_date = target_date - relativedelta(days=15)
+        
+        try:
+            # KS11(코스피 지수) 데이터를 통해 실제 장이 열린 날짜만 가져옴
+            df = fdr.DataReader('KS11', start_date, target_date)
+            
+            if not df.empty:
+                # 가장 마지막 인덱스가 target_date와 같거나 가장 가까운 과거의 영업일이 됨
+                return df.index[-1].strftime("%Y%m%d")
+                
+        except Exception as e:
+            self.logger.warning(f"[과거 영업일 탐색 실패] {target_date}: {e}")
+            
+        # 만약 API 실패 등의 이유로 조회하지 못했다면 원래 날짜를 그대로 반환 (최후의 보루)
+        return target_date.strftime("%Y%m%d")
+
     def get_kospi_universe(self, base_date: date) -> pd.DataFrame:
         """
         [미래 정보 참조 방지 및 하이브리드 매핑 적용]
         Point-in-Time 유니버스를 생성하며, 성능 향상을 위한 캐싱과 
         생존편향(Survivorship Bias) 모니터링 로직을 포함합니다.
         """
-        date_str = base_date.strftime("%Y%m%d")
+        date_str = self._get_nearest_past_bday(base_date)
         cache_file = self.cache_dir / f"universe_{date_str}.csv"
         
         # [수정] 성능 최적화: 유니버스 스냅샷 로컬 캐싱 적용
@@ -179,16 +205,18 @@ class QuantDataLoader:
         from dateutil.relativedelta import relativedelta
         import pandas as pd
 
-        date_str = base_date.strftime("%Y%m%d")
-        date_1m = (base_date - relativedelta(months=1)).strftime("%Y%m%d")
-        date_6m = (base_date - relativedelta(months=6)).strftime("%Y%m%d")
-        date_1y = (base_date - relativedelta(years=1)).strftime("%Y%m%d")
+        date_str = self._get_nearest_past_bday(base_date)
+        date_1m = self._get_nearest_past_bday(base_date - relativedelta(months=1))
+        date_6m = self._get_nearest_past_bday(base_date - relativedelta(months=6))
+        date_1y = self._get_nearest_past_bday(base_date - relativedelta(years=1))
         
         self.logger.info("실전 데이터 조달: pykrx 기간별 수익률/거래대금 API 호출 중...")
         
         # 1. 기간별 등락률 및 거래대금 (KOSPI 전 종목)
         df_1m = stock.get_market_price_change(date_1m, date_str, market="KOSPI").reset_index()
+        time.sleep(1.0)
         df_6m = stock.get_market_price_change(date_6m, date_str, market="KOSPI").reset_index()
+        time.sleep(1.0)
         df_1y = stock.get_market_price_change(date_1y, date_str, market="KOSPI").reset_index()
         
         # 컬럼명 정리 및 등락률 단위 변환 (% -> 소수점)
@@ -339,14 +367,18 @@ class QuantDataLoader:
         """
         과거 시계열 주가 및 거래량 데이터 (Stage 1 소외도 분석용)
         """
-        date_str = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
+        # 🚨 수정: 시작일과 종료일 모두 과거 영업일로 단단히 고정
+        start_str = self._get_nearest_past_bday(start_date)
+        end_str = self._get_nearest_past_bday(end_date)
+
+        date_str = f"{start_str}_{end_str}"
         cache_file = self.cache_dir / f"ohlcv_{ticker}_{date_str}.csv"
         
         if self.use_cache and self._is_cache_valid(cache_file):
             return pd.read_csv(cache_file, parse_dates=['Date'], index_col='Date', encoding='utf-8-sig')
             
         try:
-            df = fdr.DataReader(ticker, start_date, end_date)
+            df = fdr.DataReader(ticker, start_str, end_str)
             if not df.empty and self.use_cache:
                 df.to_csv(cache_file, encoding='utf-8-sig')
             return df
@@ -600,7 +632,7 @@ class QuantDataLoader:
         base_date 기준 KOSPI 전 종목의 펀더멘털 지표(PBR, BPS 등) 스냅샷을 조회합니다.
         (pykrx 기시산출값 활용)
         """
-        date_str = base_date.strftime("%Y%m%d")
+        date_str = self._get_nearest_past_bday(base_date)
         cache_file = self.cache_dir / f"fundamentals_{date_str}.csv"
         
         if self.use_cache and self._is_cache_valid(cache_file):
@@ -614,8 +646,8 @@ class QuantDataLoader:
                 
             df = df.reset_index()
             # 컬럼명 영문 표준화 (필요한 컬럼만 추출)
-            df = df.rename(columns={'티커': 'ticker', 'BPS': 'bps', 'PBR': 'pbr'})
-            df = df[['ticker', 'bps', 'pbr']]
+            df = df.rename(columns={'티커': 'ticker', 'BPS': 'bps', 'PBR': 'pbr', 'PER': 'per'})
+            df = df[['ticker', 'bps', 'pbr', 'per']]
             
             if self.use_cache:
                 df.to_csv(cache_file, index=False, encoding='utf-8-sig')
@@ -624,3 +656,27 @@ class QuantDataLoader:
         except Exception as e:
             self.logger.error(f"[FDR/pykrx 펀더멘털 호출 실패] {date_str}: {e}")
             return pd.DataFrame()
+
+    def get_quarterly_rebalance_dates(self, start_year: int, end_year: int) -> list[date]:
+        """
+        달력 기준 분기말 날짜를 생성한 뒤, 내부 헬퍼 함수를 통과시켜
+        KOSPI 실제 영업일 캘린더로 완벽하게 치환하여 반환합니다.
+        """
+        start_str = f"{start_year}-01-01"
+        end_str = f"{end_year}-12-31"
+        
+        # 기계적인 달력 기준 분기말 (예: 2019-03-31, 2019-06-30 ...)
+        quarter_ends = pd.date_range(start=start_str, end=end_str, freq="QE")
+        
+        valid_b_dates = []
+        self.logger.info(f"🗓️ KOSPI 실제 영업일 분기말 캘린더 추출 중 ({start_year}~{end_year})...")
+        
+        for d in quarter_ends:
+            # 💡 헬퍼 함수를 재사용하여 가장 가까운 과거 영업일 문자열(YYYYMMDD) 획득
+            valid_bday_str = self._get_nearest_past_bday(d.date())
+            
+            # 파이프라인과 엔진이 사용할 수 있도록 다시 date 객체로 변환
+            valid_bday_date = datetime.strptime(valid_bday_str, "%Y%m%d").date()
+            valid_b_dates.append(valid_bday_date)
+            
+        return valid_b_dates

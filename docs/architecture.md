@@ -33,7 +33,10 @@ stock_screener/
 │   ├── charts/             # visualize.py가 생성한 이미지 파일
 │   ├── test_performance_log.csv
 │   └── test_portfolio_log.csv
-└── main.py                 # 최종 실행 진입점
+├── scripts/
+│   └── clean_cache.py      # 비영업일 기준으로 어긋난 캐시 파일 정리 유틸리티
+└── main.py                 # (미착수) 실전(오늘 기준) 스크리닝 실행용 진입점 — 현재는 빈 파일이며
+                             # 실질적인 진입점은 backtest/run_backtest.py. 착수 여부는 decisions_log 참고.
 ```
 
 ## 2. 역할 분담 및 책임 경계
@@ -49,17 +52,28 @@ stock_screener/
 | :--- | :---: | :---: | :---: |
 | 원본 수집/캐싱 및 point-in-time 검증 | ✅ | ❌ | ❌ |
 | 시계열 조달 및 누적/단독 분기 정제 | ✅ | ❌ | ❌ |
-| StockProfile 조립 및 Stage 순차 호출 | ❌ | ✅ | ❌ |
+| DataFrame 조립 및 Stage 순차 호출 | ❌ | ✅ | ❌ |
 | 단계별 통과/탈락 종목 상태 이력(history) 관리 | ❌ | ✅ | ❌ |
 | Z-score 산출 및 퍼센타일 등 비율 계산 | ❌ | ❌ | ✅ (metrics_utils 호출) |
 | pass/fail 판정 및 구제(Exempt) 처리 | ❌ | ❌ | ✅ |
+
+각 stage는 탈락시킨 종목의 row도 지우지 않고 그대로 반환하되, 표준화된 사유
+(`core/schema.py`의 `FailReason` Enum 값)를 담은 `fail_reason` 컬럼만 채워 넣는다.
+`pipeline.py`는 `_accumulate_results`로 이전 단계 컬럼과 새 stage의 계산 결과를 ticker 기준으로
+병합하고, `_filter_passed`로 `fail_reason`이 비어있는(=통과) 행만 추려 다음 단계로 넘긴다. 탈락 종목을
+포함한 전체 결과는 매 단계 `history` dict에 그대로 남아 사후 분석("이 종목이 왜 몇 단계에서
+떨어졌는지")에 쓰인다. 이 패턴은 Stage 1~5 전체에 동일하게 적용된다(Stage 1은 섹터 단위로 판정한 뒤
+소속 티커에 `SECTOR_NOT_QUALIFIED` 사유를 상속시켜 티커 단위로 펼친다).
+과거에는 `StockProfile`/`StageEvent` 기반의 클래스형 상태 머신으로 이력을 관리하는 설계였으나, 실제로
+어떤 코드에서도 이 클래스들이 인스턴스화된 적이 없어 삭제되었다. 지금의 DataFrame + `fail_reason`
+컬럼 방식이 유일하게 실제로 동작하는 이력 관리 메커니즘이다.
 
 ### 2.2. 실행 및 분석 계층 분리 (CQS 패턴)
 
 명령-조회 분리(Command-Query Separation) 원칙에 따라 백테스트 실행과 분석 시각화를 엄격히 분리한다.
 
 | 구분 | backtest/ | analysis/ |
-| :--- | :---: | :---: | :---: |
+| :--- | :---: | :---: |
 | loader / pipeline 호출 및 의존성 | ✅ | ❌ (절대 참조 금지) |
 | 산출물 결과 쓰기 (CSV 등 파일 생성) | ✅ | ❌ (읽기 전용) |
 | S성과 지표(Sharpe, MDD 등) 통계 연산 | ❌ | ✅ (stats.py) |
@@ -75,7 +89,7 @@ stock_screener/
 *   **분기 단독값 정제 (Isolation)**: 
     *   **IS/CF (손익/현금흐름):** 공시된 누적 데이터를 조달한 뒤, 직전 분기 누적치를 차감하여 해당 분기의 단독값을 산출하는 방식을 원칙으로 함.
     *   **BS (재무상태표):** 특정 시점의 잔액(스냅샷)이므로 차분 로직에서 제외.
-*   **필터링 아키텍처**: 이진(Boolean) 절대 컷오프를 배제하고, `metrics_utils`를 활용한 **Z-score 가중 합산(Composite Score) 및 상위 N% 상대 평가** 원칙 적용 (Stage 1, 3, 4 공통).
+*   **필터링 아키텍처**: 이진(Boolean) 절대 컷오프를 배제하고, `metrics_utils`를 활용한 **Z-score 가중 합산(Composite Score) 및 상위 N% 상대 평가** 원칙 적용 (Stage 1, 3, 4, 5 공통). Stage 2만 예외적으로 ROE/ROIC/영업이익률 변동성 각각에 대한 독립적인 percentile 컷오프(boolean AND 결합)를 유지한다 — 세 지표를 하나의 합산 점수로 섞지 않고 각각을 유효성 게이트로 쓰는 설계이며, `screening_criteria.md` 2단계 참고.
 
 ## 4. `params.yaml` 현재 값 요약
 
@@ -84,8 +98,8 @@ stock_screener/
 | **Global** | 수익성 기준 / 공시 시차 검증 | `ttm` / `true` |
 | **Stage 1** | 모멘텀 가중치 / 통과 비율 | 수익률(0.5), 거래대금(0.5) / 상위 40% |
 | **Stage 2** | ROE, ROIC, OPM 변동성 컷오프 | 각 섹터 내 상위 50% |
-| **Stage 3** | 매출/판관비/GPM 가중치 / 통과 비율 | 매출(0.4), 판관비(0.4), GPM(0.2) / 상위 30% |
-| **Stage 4** | PBR/BPS 성장 가중치 / 통과 비율 | PBR(0.5), BPS(0.5) / 상위 30% |
+| **Stage 3** | 매출/판관비/GPM 가중치 / 통과 비율 | 매출(0.6), 판관비(0.1), GPM(0.3) / 상위 30% (성장주 프리미엄 반영) |
+| **Stage 4** | PBR/BPS 성장 가중치 / 통과 비율 | PBR(0.2), BPS(0.8) / 상위 30% (성장주 프리미엄 반영) |
 | **Stage 5** | ICR / 부채비율 가중치 / 컷오프 비율 | ICR(0.7), 부채비율(0.3) / 하위 20% 컷오프 (상위 80% 통과) |
 
 ---

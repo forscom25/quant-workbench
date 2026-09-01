@@ -34,7 +34,7 @@
 **밸류트랩 최소 방어선**
 - 낙폭 가속 필터: 최근 1개월 낙폭이 6개월 평균보다 더 가팔라지는 섹터는 `is_value_trap_warning = True`로 태깅 (구조적 쇠퇴와 일시적 소외를 최소한으로 구분) 
 
-**스키마 매핑**: `SectorProfile` (`return_z_score`, `volume_z_score`, `composite_score`, `is_value_trap_warning`)
+**스키마 매핑**: `SectorMetrics` (`return_z_score`, `volume_z_score`, `composite_score`, `is_value_trap_warning`, `fail_reason`) — 컷오프 미달 섹터도 row는 보존되고 `fail_reason`에 `COMPOSITE_SCORE_BELOW_CUTOFF`가 채워진다. 소속 티커에는 `pipeline.py`가 이 판정을 `SECTOR_NOT_QUALIFIED` 사유로 상속시켜 티커 단위 `fail_reason`을 만든다 (자세한 흐름은 [`architecture.md`](./architecture.md) §2.1 참고).
 
 ---
 
@@ -53,7 +53,7 @@
 - 시총 단독 필터는 소외 섹터 안에서 "가장 안 소외된" 대형주만 걸러내 1단계 취지와 상충될 수 있음 
 - 시총(유동성) + 수익성 지표(ROE/ROIC, 이익 변동성)를 별도 축으로 분리해 이중 필터로 운용 
 
-**스키마 매핑**: `QualityMetrics` (`roe`, `roic`, `op_margin_std`) 
+**스키마 매핑**: `QualityMetrics` (`roe`, `roic`, `op_margin_std`, `na_reasons`, `fail_reason`) — ROE/ROIC/영업이익률 변동성 세 조건 중 하나라도(구제 대상 제외) 미달하면 `fail_reason`에 `QUALITY_CUTOFF_NOT_MET`이 채워지되 row는 보존된다.
 
 **계산 방식**: `op_margin_std`는 TTM(이동합산)이 아닌 **최근 n개 분기(기본 8, `op_margin_lookback_q`)의 개별 분기 단독 영업이익률 시계열**로 계산한다 (TTM으로 만들면 변동성이 인위적으로 스무딩됨).  원자료는 `loader.get_quarterly_op_margin_series()`, 표준편차 계산은 `core/metrics_utils.compute_std()` 재사용 함수 사용 — 자세한 책임 분리는 [`architecture.md`](./architecture.md#loader--pipeline--stage-책임-경계) 참고.  유효 분기 수가 `op_margin_min_quarters`(기본 4) 미만이면 `NOT_COMPUTABLE`. 
 
@@ -80,7 +80,7 @@
 - 지표별 상대 평가(Z-score) 후 합산 점수(Composite Score)로 상위 N%를 선별함으로써 시장 상황(호황/불황)에 유연하게 대응 가능.
 - "제 살 깎기(매출은 박살 나는데 비용만 줄인 경우)"는 절대 탈락이 아닌 경고 태그(`is_cost_cutting_warning`)를 부여하여 포트폴리오 편입 시 비중 조절 등에 활용.
 
-**스키마 매핑**: `TurnaroundMetrics` (`sga_yoy_avg`, `sales_growth_yoy`, `gpm_yoy`, `stage3_score`, `is_cost_cutting_warning`)
+**스키마 매핑**: `TurnaroundMetrics` (`sga_yoy_avg`, `sales_growth_yoy`, `gpm_yoy`, `stage3_score`, `is_cost_cutting_warning`, `na_reasons`, `fail_reason`) — 컷오프 미달 시 `fail_reason`에 `COMPOSITE_SCORE_BELOW_CUTOFF`, 데이터 부족 시 `DATA_TOO_SHORT`가 채워지되 row는 보존된다.
 
 **업종 편차 주의 / na_reasons 태그**
 - `TURNAROUND_NOT_COMPUTABLE`: 재고자산·매출원가(GPM) 개념 자체가 없는 업종 (은행 등 금융업) → 결측치 처리되어 **점수 필터링 면제(구제 통과)** 
@@ -104,9 +104,9 @@
 - PBR의 상대적 매력도와 BPS 훼손 여부를 합산 점수로 평가하여 유연성 확보.
 - PBR이 0 이하(자본잠식)인 데이터는 Z-score 정규화 과정에서 클리핑(Clipping) 및 역수 처리 문제를 일으키므로, 결측치(`NaN`)로 치환하여 `EXEMPT` 처리 후 5단계로 넘김.
 
-**스키마 매핑**: `ValuationMetrics` (`pbr`, `bps_growth_yoy`, `stage4_score`, `is_pbr_value_trap`)
+**스키마 매핑**: `ValuationMetrics` (`pbr`, `per`, `bps_growth`, `stage4_score`, `is_pbr_value_trap`) — 필드명은 `bps_growth`(과거 `bps_growth_yoy`에서 변경). `per`는 pykrx 응답에서 함께 실려오는 값을 보존만 하며, 아직 composite score 계산에는 포함되지 않는다(참고용/향후 확장 필드). `psr`은 별도 DART 조회가 필요해 스키마에서 제외했으며 [TODO](#미정-사항-todo) 참고.
 
-**데이터 소스**: `pbr`/`bps`는 DART 계정을 조합해 직접 계산하지 않고 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값을 그대로 사용한다 (발행주식수 별도 조회 불필요).  근거는 [`architecture.md`](./architecture.md#밸류에이션-원자료는-pykrx-기시산출값-사용) 참고. 
+**데이터 소스**: `pbr`/`bps`/`per`는 DART 계정을 조합해 직접 계산하지 않고 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값을 그대로 사용한다 (발행주식수 별도 조회 불필요).  근거는 [`architecture.md`](./architecture.md#밸류에이션-원자료는-pykrx-기시산출값-사용) 참고. 
 
 **업종 편차 주의 / na_reasons 태그**
 - PBR 미산출(`NaN`) 또는 0 이하(자본잠식 등): **임시 구제(EXEMPT) 통과** — 최종 판단은 5단계 재무 건전성에서 자본잠식 여부로 걸러내는 쪽에 위임.  *pipeline.py가 5단계에서 실제로 이 임시 통과 종목을 재검증하는지 구현 시 확인 완료.*
@@ -129,7 +129,7 @@
 - 이진 컷오프는 턴어라운드 초기 기업을 무조건 탈락시키므로, 하위 20% 컷오프와 경고 태그(Warning Tag) 시스템으로 전환하여 최종 포트폴리오 비중 조절에 활용함
 - 5단계까지 살아남은 종목들은 이미 각 섹터의 리더이므로, 섹터 내 비교 시 표본 부족(N=1)으로 인한 통계 오류가 발생함[cite: 7]. 따라서 최종 생존자 전체를 하나의 풀(Pool)로 묶어 상대 평가함
 
-**스키마 매핑**: `FinancialHealthMetrics` (`debt_ratio`, `ocf`, `net_income`, `interest_coverage_ratio`, `stage5_score`, `warning_tags`, `na_reasons`)
+**스키마 매핑**: `FinancialHealthMetrics` (`debt_ratio`, `ocf`, `net_income`, `interest_coverage_ratio`, `stage5_score`, `warning_tags`, `na_reasons`, `fail_reason`) — 하위 20% 컷오프 미달 시 `fail_reason`에 `COMPOSITE_SCORE_BELOW_CUTOFF`가 채워지되 row는 보존된다 (다른 4개 단계와 동일한 패턴).
 
 **업종 편차 주의 / na_reasons 태그**
 - `DEBT_RATIO_CAUTION`: 금융업 등 부채비율 절대치 비교가 무의미한 업종 → 부채비율 기준 **면제**, 업종 내 상대비교로 대체 (구체 산출 방식은 [TODO](#미정-사항-todo) 참고, 아직 미확정) 
@@ -145,14 +145,14 @@
    - 재고회전율 상승 = 효율화 vs 재고회전율 상승 = 수요 둔화 
    - PBR 낮음 = 저평가 vs PBR 낮음 = 정당한 평가(밸류트랩) 
    → 반드시 2차 조건을 페어로 걸어 방향성을 확인 
-3. **업종 특성 편차는 `na_reasons`로 태깅**: 필드 타입은 단순하게(`float`) 유지하고, 결측/계산불가/해석주의 사유는 각 Metrics 클래스의 `na_reasons: dict[str, tuple[MetricStatus, Optional[str]]]`에 개별 기록 
+3. **업종 특성 편차는 `na_reasons`로 태깅**: 필드 타입은 단순하게(`float`) 유지하고, 결측/계산불가/해석주의 사유는 각 Metrics 클래스의 `na_reasons`에 개별 기록. ⚠️ 현재 구현은 stage마다 실제 타입이 다르다 — Stage 3은 `dict[str, tuple[MetricStatus, str]]`, Stage 2/5는 쉼표로 이어붙인 `str`(comma-joined tag string). 완전히 통일되어 있지 않으므로 stage별 코드를 직접 참고할 것 (통일은 [TODO](#미정-사항-todo)).
    - `NOT_COMPUTABLE`: 계산 자체가 불가능한 경우 (예: 금융업 재고자산 없음) 
    - `CAUTION`: 계산은 되나 업종 특성상 절대비교가 부적합한 경우 (예: 금융업 부채비율) 
 3-1. **`NOT_COMPUTABLE`이라고 해서 전부 탈락 처리하지 않는다** — 원인이 "업종 특성상 그 지표 자체가 성립하지 않음"인지 "데이터가 실제로 부족함"인지에 따라 처리가 갈린다: 
    - **업종/구조적 이유로 계산 불가** (예: 금융업 ROIC, 무차입 기업 이자보상배율): 해당 지표 필터만 **구제(exempt) 통과**, 나머지 지표로 판정 
    - **데이터 가용성 부족** (예: 신규상장으로 YoY 비교용 6분기치 미달인 `DATA_TOO_SHORT`): 구제 대상이 아니며 **기계적 탈락**.  판단 근거 자체가 없는 것과 업종 특성상 지표가 없는 것은 다르게 취급한다. 
    - 각 stage 문서의 "업종 편차 주의" 절에 구체 태그명과 처리 정책(구제/면제/기계적 탈락)을 명시한다. 
-4. **Look-ahead bias 및 공시 시차(Disclosure Lag) 차단**: 섹터 데이터의 기준일(`base_date`)이 종목 기준일보다 미래일 수 없도록 스키마 레벨에서 강제 (`inject_sector_info`의 `ValueError` 체크). 캘린더 기준이 아닌 KOSPI 실제 영업일을 조회하여 기준일로 삼고, 재무 데이터는 아직 공시되지 않은 분기를 참조하지 않도록 동적으로 최신 공시 분기를 역산하여 `t=0` 시점으로 확정한다.
+4. **Look-ahead bias 및 공시 시차(Disclosure Lag) 차단**: 캘린더 기준이 아닌 KOSPI 실제 영업일을 조회하여 기준일로 삼고(`loader._get_nearest_past_bday`), 재무 데이터는 아직 공시되지 않은 분기를 참조하지 않도록 동적으로 최신 공시 분기를 역산하여 `t=0` 시점으로 확정한다. ⚠️ 과거 이 문서는 "섹터 데이터 기준일이 종목 기준일보다 미래일 수 없도록 `inject_sector_info`의 `ValueError`로 스키마 레벨에서 강제한다"고 서술했으나, 이 메서드가 속해 있던 `StockProfile` 클래스 자체가 실제로 어디서도 쓰인 적이 없어 삭제되었다. 즉 섹터/종목 기준일 불일치를 명시적으로 막는 코드는 **현재 존재하지 않는다** — 재도입 여부는 [TODO](#미정-사항-todo) 참고.
 5. **forward-return 백테스트로 사후 검증**: 각 단계의 임계치(percentile 컷, 통과 비율, 가중치 w1/w2 등)는 최종 확정값이 아니라 백테스트를 통해 지속적으로 튜닝되어야 함. 검증 시 현실적인 마찰 비용(수수료, 슬리피지)과 T+1일 시가/종가 진입을 엔진에서 엄격히 차감하여 실전 수익률과의 괴리를 최소화한다.
 6. **단계별 지표 누적 및 의존성 보존**: 각 단계의 필터링은 이전 단계에서 산출된 핵심 지표를 페어(Pair) 검증에 적극 활용합니다.  예를 들어 4단계(밸류에이션)의 밸류트랩 검증(`is_pbr_value_trap`)은 2단계에서 계산된 roe 지표를 필수로 요구합니다.  따라서 파이프라인은 통과 종목을 걸러내는 것뿐만 아니라, 각 단계에서 계산된 새로운 지표들이 다음 단계로 누락 없이 병합(Merge)되어 전달되도록 상태를 보존해야 합니다.
 7. **실행(Command)과 조회(Query)의 엄격한 분리 (CQS)**: 파이프라인의 다중 시점 실행 및 데이터 쓰기(백테스트 CSV 생성) 환경과, 생성된 데이터를 읽기만 하여 통계/차트를 도출하는 성과 분석 환경을 철저히 분리하여 순수 함수 기반의 견고한 분석 아키텍처를 유지한다.
@@ -162,13 +162,16 @@
 
 ## 미정 사항 (TODO)
 
-- [ ] `fail_reason`을 자유 텍스트에서 `FailReason` Enum으로 고도화 (탈락 사유 표준화) 
 - [ ] 1단계 z_return, z_volume 가중치(w1, w2) 초기값 0.5/0.5 → forward-return 상관관계로 백테스트 튜닝 
 - [ ] 1단계 통과 비율(상위 30~40%) 확정 → 백테스트로 최적 구간 탐색 
 - [ ] 재무 데이터 자체의 지연(발표 시점 lag)을 추적하는 필드 추가 검토 (현재는 섹터-종목 간 lag만 `sector_data_lag_days`로 추적) 
 - [ ] 5단계 부채비율 업종 상대기준의 구체적 산출 방식(업종 중위값 대비 몇 %인지) 확정
-- [ ] `analysis/visualize.py` 렌더링 라이브러리 선정 (matplotlib vs plotly) 및 핵심 차트 레이아웃 확정
 - [ ] 3, 4단계 성장주 타겟팅 세부 가중치(매출 0.6 / BPS 0.8 등) 반영 후, 편입 종목 수에 따른 컷오프 상향(상위 30% -> 20%) 튜닝 검토
+- [ ] Stage4 `per` 필드를 composite score에 실제로 반영할지 여부 결정 (현재는 값만 보존, 스코어링 미반영)
+- [ ] `psr`(시가총액/TTM매출) 계산 로직 구현 — 별도 DART 매출 조회 루프 필요(Stage5급 공수), Stage4 스키마에 재추가할지 결정
+- [ ] `na_reasons` 필드 타입을 stage 전체에서 통일 (현재 Stage3은 dict, Stage2/5는 comma-joined string)
+- [ ] 섹터-종목 기준일 역전(look-ahead bias) 방지용 명시적 체크 재도입 여부 결정 — 과거 `inject_sector_info`가 담당했으나 삭제된 뒤 대체 로직 없음
+- [ ] `main.py`(실전 스크리닝 진입점) 착수 여부 및 시점 결정 — 현재 미착수, 백테스트는 `backtest/run_backtest.py`로 별도 진행 중
 
 ---
 
@@ -182,4 +185,5 @@
 | 2026-08-01 | 실전 KOSPI 데이터 Funnel 분석 결과 반영: 3단계 판관비율 확인 기간(sga_lookback_quarters)을 6분기에서 4분기로 완화.  공통 설계 원칙에 단계별 지표 누적 의존성(상태 보존) 항목 추가  |
 | 2026-08-03 | Stage 3, 4의 필터링 로직을 이진 조건(Hard Cut)에서 **Z-score 가중 합산(Composite Score)** 및 상대 퍼센타일 평가로 전면 개편.  매출 역성장, 밸류트랩 등은 탈락 사유가 아닌 경고 태그(Tag)로 전환 |
 | 2026-08-04 | Stage 5 재무 건전성 평가를 절대 컷오프에서 Z-score 가중 합산(Composite Score) 방식으로 개편. 턴어라운드 성장주 구제를 위해 ICR에 0.7 가중치 부여 및 경고 태그(Warning Tag) 도입. 생존자 편향 오류 수정을 위해 섹터 상대평가에서 Pool 상대평가로 전환 |
-| 2026-08-07 | 공통 설계 원칙 고도화: CQS(명령-조회 분리) 아키텍처 원칙 추가, KOSPI 시세 기반 실제 영업일 추출 및 공시 시차 원천 차단 로직 반영, 자본 증식 가속화를 위한 성장주 프리미엄 원칙 추가
+| 2026-08-07 | 공통 설계 원칙 고도화: CQS(명령-조회 분리) 아키텍처 원칙 추가, KOSPI 시세 기반 실제 영업일 추출 및 공시 시차 원천 차단 로직 반영, 자본 증식 가속화를 위한 성장주 프리미엄 원칙 추가 |
+| 2026-09-01 | 문서-구현 정합화: "탈락 종목 보존"(fail_reason 컬럼) 패턴을 Stage 1/2/5까지 전체 확장, 그에 맞춰 각 단계 스키마 매핑 갱신(`fail_reason` 필드 반영). Stage4에 `per` 필드 추가(실제 값 채움, 스코어링 미반영), `psr`은 스키마에서 제거하고 TODO로 이관. 한 번도 실제로 쓰인 적 없던 `StockProfile`/`inject_sector_info` 기반 look-ahead bias 방지 서술을 삭제하고 "현재 미구현" 상태로 정정. `na_reasons` 타입이 stage마다 다르다는 점을 명시(통일은 TODO). `fail_reason` Enum 고도화 및 `visualize.py` 라이브러리 선정 TODO는 이미 완료되어 제거

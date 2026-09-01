@@ -3,6 +3,8 @@ import numpy as np
 import logging
 from typing import Dict, List
 
+from core.schema import SectorCols, SectorMetrics, FailReason, validate_schema
+
 class NeglectedSectorScreener:
     """
     1단계: 소외 섹터 발굴 (Neglected Firm Effect)
@@ -60,20 +62,24 @@ class NeglectedSectorScreener:
         df['is_value_trap_warning'] = (df['return_1m'] < 0) & (df['return_1m'] < avg_monthly_drop_6m)
 
         # ---------------------------------------------------------
-        # 5. 최종 후보군 필터링 (Top Percentile)
+        # 5. 최종 후보군 필터링 (Top Percentile) — 탈락 섹터도 fail_reason 태깅 후 보존
         # ---------------------------------------------------------
         # 상위 N% 통과 비율 적용
         cutoff_rank = int(len(df) * self.pass_ratio)
         df['rank'] = df['composite_score'].rank(ascending=False, method='min')
-        
-        passed_sectors = df[df['rank'] <= cutoff_rank].copy()
-        
+
+        df[SectorCols.fail_reason] = None
+        df.loc[df['rank'] > cutoff_rank, SectorCols.fail_reason] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
+
+        passed_count = df[SectorCols.fail_reason].isnull().sum()
+        self.logger.info(f"[Stage 1] 총 {len(df)}개 섹터 중 {passed_count}개 섹터 통과 (Pass Ratio: {self.pass_ratio*100}%)")
+
         # 스키마 매핑 형식에 맞춰 반환 컬럼 정리
         schema_columns = [
-            'sector', 'return_z_score', 'volume_z_score', 
-            'composite_score', 'is_value_trap_warning'
+            'sector', 'return_z_score', 'volume_z_score',
+            'composite_score', 'is_value_trap_warning', 'fail_reason'
         ]
-        
-        self.logger.info(f"[Stage 1] 총 {len(df)}개 섹터 중 {len(passed_sectors)}개 섹터 통과 (Pass Ratio: {self.pass_ratio*100}%)")
-        
-        return passed_sectors[schema_columns].sort_values(by='composite_score', ascending=False)
+        result = df[schema_columns].sort_values(by='composite_score', ascending=False)
+
+        validate_schema(result, SectorMetrics)
+        return result

@@ -2,7 +2,7 @@ import pandas as pd
 import logging
 from typing import Dict, Any, Tuple
 from datetime import date
-from core.schema import Stage
+from core.schema import Stage, FailReason
 
 # 구현된 5개 스테이지 임포트
 from stages.stage1_neglected_sector import NeglectedSectorScreener
@@ -14,9 +14,8 @@ from stages.stage5_financial_health import FinancialHealthScreener
 class QuantPipeline:
     """
     종목 선별 파이프라인 오케스트레이터.
-    - 데이터의 조달은 loader에 위임합니다.
-    - 지표의 계산 및 통과/탈락 판정은 각 stage에 위임합니다.
-    - 본 클래스는 조건문 기반의 계산 로직을 갖지 않으며, 오직 실행 순서와 이력(history)만 관리합니다.
+    - 데이터 조달은 loader에, 판정은 각 stage에 위임합니다.
+    - fail_reason 컬럼을 통해 탈락 사유를 로깅하고, 통과한 종목만 다음 단계로 넘깁니다.
     """
     def __init__(self, params: Dict[str, Any], loader):
         self.params = params
@@ -32,18 +31,28 @@ class QuantPipeline:
 
     def _accumulate_results(self, input_df: pd.DataFrame, stage_result_df: pd.DataFrame) -> pd.DataFrame:
         """
-        [핵심 로직] 이전 단계의 데이터를 유실하지 않도록, 통과한 종목(ticker)을 기준으로 
+        [핵심 로직] 이전 단계의 데이터를 유실하지 않도록, ticker를 기준으로
         기존 컬럼(input_df)과 새로 계산된 컬럼(stage_result_df)을 안전하게 병합합니다.
         """
         if stage_result_df.empty:
             return pd.DataFrame()
-            
+
+        # 'fail_reason'은 매 단계 새로 판정되는 값이므로, input_df에 남아있는 이전 값
+        # (필터링을 통과한 입력이라 항상 None)을 지우고 이번 stage의 판정으로 교체한다.
+        base_df = input_df.drop(columns=['fail_reason'], errors='ignore')
+
         # 중복되는 컬럼(예: sector) 충돌 방지: ticker만 남기고 교집합 제외
-        cols_to_use = stage_result_df.columns.difference(input_df.columns).tolist()
+        cols_to_use = stage_result_df.columns.difference(base_df.columns).tolist()
         cols_to_use.append('ticker')
-        
-        # 교집합인 ticker를 기준으로 inner merge (통과한 종목만 남으면서 이전 데이터 누적)
-        return pd.merge(input_df, stage_result_df[cols_to_use], on='ticker', how='inner')
+
+        # ticker를 기준으로 inner merge하여 이전 데이터를 누적
+        return pd.merge(base_df, stage_result_df[cols_to_use], on='ticker', how='inner')
+
+    def _filter_passed(self, df: pd.DataFrame) -> pd.DataFrame:
+        """fail_reason이 None(결측치)인 종목(통과 종목)만 추출하여 복사본 반환"""
+        if 'fail_reason' not in df.columns:
+            return df.copy()
+        return df[df['fail_reason'].isnull()].copy()
     
     def run(self, base_date: date, stop_after: Stage | None = None) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
         """
@@ -68,20 +77,35 @@ class QuantPipeline:
         # 1. Stage 1: 소외 섹터 발굴
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 1: Neglected Sector")
-        passed_sectors_df = self.stage1.run(sector_metrics_df)
-        
-        if passed_sectors_df.empty:
-            self.logger.warning("Stage 1에서 통과한 섹터가 없습니다. 파이프라인을 종료합니다.")
+        sector_result_df = self.stage1.run(sector_metrics_df)
+
+        if sector_result_df.empty:
+            self.logger.warning("Stage 1에서 처리할 섹터 데이터가 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
 
-        # 통과한 섹터에 속하는 종목들만 유니버스에서 추출하여 Stage 2로 전달
-        passed_sectors_list = passed_sectors_df['sector'].tolist()
-        stage1_passed_tickers = universe_df[universe_df['sector'].isin(passed_sectors_list)].copy()
+        # 섹터 단위 판정을 티커 단위로 전개: 섹터가 탈락하면 소속 티커 전원이
+        # SECTOR_NOT_QUALIFIED를 상속받는다 (섹터 자체의 컷오프 탈락 사유와는 별개 개념).
+        sector_extra_cols = sector_result_df.columns.difference(['fail_reason']).tolist()
+        sector_status = sector_result_df[sector_extra_cols + ['fail_reason']].rename(
+            columns={'fail_reason': 'sector_fail_reason'}
+        )
+        stage1_ticker_df = pd.merge(universe_df, sector_status, on='sector', how='left')
 
-        history['stage1'] = stage1_passed_tickers
+        stage1_ticker_df['fail_reason'] = None
+        stage1_ticker_df.loc[
+            stage1_ticker_df['sector_fail_reason'].notna(), 'fail_reason'
+        ] = FailReason.SECTOR_NOT_QUALIFIED.value
+        stage1_ticker_df.drop(columns=['sector_fail_reason'], inplace=True)
+
+        history['stage1'] = stage1_ticker_df
+        stage1_passed_tickers = self._filter_passed(stage1_ticker_df)
+
+        if stage1_passed_tickers.empty:
+            self.logger.warning("Stage 1에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
+            return pd.DataFrame(), history
 
         # 🚨 [추가] Stage 1 이후 조기 종료
-        if stop_after is not None and stop_after == Stage.NEGLECTED_SECTOR:
+        if stop_after is not None and stop_after == Stage.STAGE1:
             return stage1_passed_tickers, history
         
         # ---------------------------------------------------------
@@ -89,15 +113,18 @@ class QuantPipeline:
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 2: Sector Leaders")
         stage2_raw = self.stage2.run(stage1_passed_tickers, self.loader, base_date)
-        passed_stage2_df = self._accumulate_results(stage1_passed_tickers, stage2_raw)
-        history['stage2'] = passed_stage2_df
+        accumulated_stage2 = self._accumulate_results(stage1_passed_tickers, stage2_raw)
+
+        # 전체 이력(탈락 포함) 저장 후 통과 종목만 추출
+        history['stage2'] = accumulated_stage2
+        passed_stage2_df = self._filter_passed(accumulated_stage2)
         
         if passed_stage2_df.empty:
             self.logger.warning("Stage 2에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
         
         # 🚨 [추가] Stage 2 이후 조기 종료
-        if stop_after is not None and stop_after == Stage.SECTOR_LEADERS:
+        if stop_after is not None and stop_after == Stage.STAGE2:
             return passed_stage2_df, history
 
         # ---------------------------------------------------------
@@ -105,15 +132,17 @@ class QuantPipeline:
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 3: Fundamental Improve")
         stage3_raw = self.stage3.run(passed_stage2_df, self.loader, base_date)
-        passed_stage3_df = self._accumulate_results(passed_stage2_df, stage3_raw)
-        history['stage3'] = passed_stage3_df
+        accumulated_stage3 = self._accumulate_results(passed_stage2_df, stage3_raw)
+
+        history['stage3'] = accumulated_stage3
+        passed_stage3_df = self._filter_passed(accumulated_stage3)
         
         if passed_stage3_df.empty:
             self.logger.warning("Stage 3에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
 
         # 🚨 [추가] Stage 3 이후 조기 종료
-        if stop_after is not None and stop_after == Stage.FUNDAMENTAL_IMPROVE:
+        if stop_after is not None and stop_after == Stage.STAGE3:
             return passed_stage3_df, history
 
         # ---------------------------------------------------------
@@ -121,15 +150,17 @@ class QuantPipeline:
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 4: Valuation")
         stage4_raw = self.stage4.run(passed_stage3_df, self.loader, base_date)
-        passed_stage4_df = self._accumulate_results(passed_stage3_df, stage4_raw)
-        history['stage4'] = passed_stage4_df
+        accumulated_stage4 = self._accumulate_results(passed_stage3_df, stage4_raw)
         
+        history['stage4'] = accumulated_stage4
+        passed_stage4_df = self._filter_passed(accumulated_stage4)
+
         if passed_stage4_df.empty:
             self.logger.warning("Stage 4에서 통과한 종목이 없습니다. 파이프라인을 종료합니다.")
             return pd.DataFrame(), history
 
         # 🚨 [추가] Stage 4 이후 조기 종료
-        if stop_after is not None and stop_after == Stage.VALUATION:
+        if stop_after is not None and stop_after == Stage.STAGE4:
             return passed_stage4_df, history
 
         # ---------------------------------------------------------
@@ -137,7 +168,10 @@ class QuantPipeline:
         # ---------------------------------------------------------
         self.logger.info(">>> Running Stage 5: Financial Health")
         stage5_raw = self.stage5.run(passed_stage4_df, self.loader, base_date)
-        final_df = self._accumulate_results(passed_stage4_df, stage5_raw)
+        final_accumulated = self._accumulate_results(passed_stage4_df, stage5_raw)
+
+        history['stage5'] = final_accumulated
+        final_df = self._filter_passed(final_accumulated)
         
         self.logger.info(f"========== [Pipeline End] Final Passed: {len(final_df)} ==========")
         

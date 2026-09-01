@@ -3,6 +3,12 @@ import numpy as np
 import logging
 from dateutil.relativedelta import relativedelta
 from core.metrics_utils import calc_zscore, compute_composite_score, apply_percentile_filter
+from core.schema import (
+    ValuationCols,
+    ValuationMetrics,
+    FailReason,
+    validate_schema
+)
 
 class ValuationScreener:
     """
@@ -23,15 +29,29 @@ class ValuationScreener:
         if input_df.empty: return input_df
 
         date_1y_ago = base_date - relativedelta(years=1)
+
+        # 1. 펀더멘털 데이터 로드 (loader 내부에서 영업일 보정됨)
         fund_t0 = loader.get_market_fundamental_cross_section(base_date)
         fund_t4 = loader.get_market_fundamental_cross_section(date_1y_ago)
         
+        # 컬럼명을 소문자로 통일 (pykrx 대문자 출력 대응)
+        fund_t0.columns = fund_t0.columns.str.lower()
+        fund_t4.columns = fund_t4.columns.str.lower()
+
+        # 1년 전 BPS 추출
         fund_t4 = fund_t4[['ticker', 'bps']].rename(columns={'bps': 'bps_1y_ago'})
-        
+
+        # 기존 통과 데이터에 병합 (fund_t0에 pbr/bps/per가 함께 실려옴)
         df = pd.merge(input_df, fund_t0, on='ticker', how='left')
         df = pd.merge(df, fund_t4, on='ticker', how='left')
 
-        df['bps_growth_yoy'] = np.where(
+        # 안전망: loader 응답에 per 컬럼이 없는 극단적 실패 상황에서도 스키마를 만족시키기 위함
+        # (정상 흐름에서는 fund_t0 merge로 이미 실제 값이 채워져 있어야 함)
+        if ValuationCols.per not in df.columns:
+            df[ValuationCols.per] = np.nan
+
+        # 2. BPS 성장률 계산 (스키마 규격에 맞춰 컬럼명 'bps_growth' 사용)
+        df[ValuationCols.bps_growth] = np.where(
             (pd.notna(df['bps'])) & (pd.notna(df['bps_1y_ago'])) & (df['bps_1y_ago'] != 0),
             (df['bps'] - df['bps_1y_ago']) / np.abs(df['bps_1y_ago']),
             np.nan
@@ -40,33 +60,43 @@ class ValuationScreener:
         # ---------------------------------------------------------
         # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------
-        # PBR 역수 처리 (자본잠식, 0 이하 값 처리)
-        safe_pbr = df['pbr'].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
+        # PBR 역수 처리 (자본잠식 등 0 이하 값은 np.nan 처리하여 구제)
+        safe_pbr = df[ValuationCols.pbr].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
         df['pbr_inv_z'] = calc_zscore(1 / safe_pbr)
-        df['bps_z'] = calc_zscore(df['bps_growth_yoy'])
+        df['bps_z'] = calc_zscore(df[ValuationCols.bps_growth])
         
         weights = {'pbr_inv_z': self.pbr_weight, 'bps_z': self.bps_weight}
-        df['stage4_score'] = compute_composite_score(df, weights)
+        df[ValuationCols.stage4_score] = compute_composite_score(df, weights)
+        df.drop(columns=['pbr_inv_z', 'bps_z'], inplace=True)
 
-        # 밸류 트랩 경고 태그 (탈락이 아님)
-        df['is_pbr_value_trap'] = (df['pbr_inv_z'] > 0) & (df['roe'] < self.trap_roe_threshold)
+        # 밸류 트랩 경고 태그 (이전 단계에서 roe 컬럼이 넘어왔다고 가정)
+        roe_series = df.get('roe', pd.Series(0, index=df.index))
+        df['is_pbr_value_trap'] = (df[ValuationCols.stage4_score] > 0) & (roe_series < self.trap_roe_threshold)
 
-        # 자본잠식 등 PBR 결측치 구제 대상 마킹
-        is_exempt = df['pbr'].isna() | (df['pbr'] <= 0)
-        df.loc[is_exempt, 'stage4_score'] = np.nan
-
-        # 퍼센타일 컷오프 (결측치 구제 포함)
-        passed_df, _ = apply_percentile_filter(df, 'stage4_score', self.pass_percentile)
+        # ---------------------------------------------------------
+        # 4. FailReason 태깅 로직 (Row 삭제 안 함)
+        # ---------------------------------------------------------
+        df['fail_reason'] = None
         
-        # Status 로깅
-        passed_df.loc[passed_df['stage4_score'].isna(), 'stage4_status'] = 'EXEMPT'
-        passed_df.loc[passed_df['stage4_score'].notna(), 'stage4_status'] = 'PASSED'
+        # 자본잠식 등 PBR 결측치 구제 대상 마킹 (점수는 무효화하지만 탈락시키지는 않음)
+        is_exempt = df[ValuationCols.pbr].isna() | (df[ValuationCols.pbr] <= 0)
+        df.loc[is_exempt, ValuationCols.stage4_score] = np.nan
 
-        self.logger.info(f"[Stage 4] {len(df)}개 종목 중 {len(passed_df)}개 저평가 종목 통과 (상위 {self.pass_percentile*100}%)")
+        valid_mask = ~is_exempt
+        if valid_mask.any():
+            cutoff_val = df.loc[valid_mask, ValuationCols.stage4_score].quantile(1.0 - self.pass_percentile)
+            
+            # 컷오프 미달 탈락 처리
+            is_below_cutoff = valid_mask & (df[ValuationCols.stage4_score] < cutoff_val)
+            df.loc[is_below_cutoff, 'fail_reason'] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
+
+        # 로깅
+        passed_count = df['fail_reason'].isnull().sum()
+        self.logger.info(f"[Stage 4] {len(df)}개 종목 중 {passed_count}개 저평가 종목 통과 (상위 {self.pass_percentile*100}%)")
         
-        # 반환 스키마 유지
-        schema_columns = ['ticker', 'sector', 'pbr', 'bps_growth_yoy', 'is_pbr_value_trap', 'stage4_status']
-        # 기존 input_df의 컬럼을 유실하지 않도록 컬럼 교집합 유지
-        final_cols = list(set(input_df.columns.tolist() + schema_columns))
+        # ---------------------------------------------------------
+        # 5. 스키마 무결성 검증 (출하 전 최종 확인)
+        # ---------------------------------------------------------
+        validate_schema(df, ValuationMetrics)
         
-        return passed_df[[c for c in final_cols if c in passed_df.columns]]
+        return df

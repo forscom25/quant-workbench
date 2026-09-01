@@ -2,11 +2,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Tuple
 
-# 상태 태깅을 위한 간단한 Enum 클래스 (schema.py에 있다면 import 해서 사용)
-class MetricStatus:
-    COMPUTED = "COMPUTED"
-    NOT_COMPUTABLE = "NOT_COMPUTABLE"
-    CAUTION = "CAUTION"
+from core.schema import MetricStatus
 
 def compute_std(series: List[float], min_valid_points: int = 4) -> Tuple[float, str]:
     """

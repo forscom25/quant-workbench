@@ -3,6 +3,7 @@ import sys
 import yaml
 import itertools
 import pandas as pd
+import time
 from datetime import date
 from pathlib import Path
 
@@ -25,11 +26,12 @@ def resolve_target_tickers(pipeline: QuantPipeline, base_dates: list[date]) -> s
     for bd in base_dates:
         # DART 호출 없이 가격/거래대금만으로 1단계 단독 실행
         try:
-            survivors_df, _ = pipeline.run(bd, stop_after=Stage.NEGLECTED_SECTOR)
+            survivors_df, _ = pipeline.run(bd, stop_after=Stage.STAGE1)
             if not survivors_df.empty:
                 target_tickers.update(survivors_df['ticker'].tolist())
         except Exception as e:
             print(f"  ⚠️ {bd} 기준일 Stage 1 실행 중 에러 (건너뜀): {e}")
+        time.sleep(2.0)
 
     print(f"✅ [1/2] 타겟 종목 추출 완료: 총 {len(target_tickers)}개 종목이 후보군으로 선정되었습니다.\n")
     return target_tickers
@@ -51,9 +53,8 @@ def warm_up_dart_cache():
     loader = QuantDataLoader(use_cache=True)
     pipeline = QuantPipeline(params, loader)
     
-    # 2. 백테스트 대상 분기말 생성 (2019-01-01 ~ 2025-12-31)
-    quarter_ends = pd.date_range(start="2019-01-01", end="2025-12-31", freq="QE")
-    base_dates = [d.date() for d in quarter_ends]
+    # 2. 백테스트와 동일하게 KOSPI 영업일 기반으로 생성
+    base_dates = loader.get_quarterly_rebalance_dates(2019, 2025)
     
     # 3. 프리 필터(Pre-filter)를 통한 타겟 종목 도출
     target_tickers = resolve_target_tickers(pipeline, base_dates)

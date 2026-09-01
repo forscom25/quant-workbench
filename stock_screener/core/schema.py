@@ -1,194 +1,104 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields, field
+from types import SimpleNamespace
 from typing import Optional
-from datetime import date, datetime
 from enum import Enum, IntEnum
 
-# ==========================================
-# 1. 상태 및 메타데이터 열거형(Enum) 정의
-# ==========================================
-
+# =========================================================
+# 1. Pipeline Control Enums (파이프라인 제어용 상태값)
+# =========================================================
 class Stage(IntEnum):
-    """IntEnum으로 전환: 단계 간 순서 비교(<=, <, >) 가능
-    (pipeline.run(stop_after=...) 같은 부분 실행 기능에 필요)
-    각 멤버명은 stages/ 폴더의 파일명과 1:1로 맞춤"""
-    PENDING = 0
-    NEGLECTED_SECTOR = 1      # stage1_neglected_sector.py
-    SECTOR_LEADERS = 2        # stage2_sector_leaders.py
-    FUNDAMENTAL_IMPROVE = 3   # stage3_fundamental_improve.py
-    VALUATION = 4             # stage4_valuation.py
-    FINANCIAL_HEALTH = 5      # stage5_financial_health.py
-    COMPLETED = 6
+    """단계 간 순서 비교(<=, <, >) 가능 (stop_after 로직 지원)"""
+    STAGE1 = 1
+    STAGE2 = 2
+    STAGE3 = 3
+    STAGE4 = 4
+    STAGE5 = 5
 
-class Status(Enum):
-    IN_PROGRESS = "in_progress"
-    PASSED = "passed"
-    FAILED = "failed"
-    DATA_INJECTED = "data_injected"  # 외부 데이터 주입 등 특수 이벤트 로깅용 추가
+class FailReason(Enum):
+    """DataFrame의 fail_reason 컬럼에 들어갈 규격화된 탈락 사유"""
+    SECTOR_NOT_QUALIFIED = "sector_not_qualified"
+    QUALITY_CUTOFF_NOT_MET = "quality_cutoff_not_met"
+    COMPOSITE_SCORE_BELOW_CUTOFF = "composite_score_below_cutoff"
+    DATA_TOO_SHORT = "data_too_short"
+    CRITICAL_METRIC_NOT_COMPUTABLE = "critical_metric_not_computable"
 
 class MetricStatus(Enum):
-    COMPUTED = "computed"              # 정상 계산됨
-    NOT_COMPUTABLE = "not_computable"  # 계산 불가 (결측/정의 불가, float('nan') 할당 기준)
-    CAUTION = "caution"                # 처리 주의 (계산은 됐으나 해석 유의)
+    """na_reasons 딕셔너리에 사용될 연산 상태"""
+    COMPUTED = "computed"
+    NOT_COMPUTABLE = "not_computable"
+    CAUTION = "caution"
 
-# ==========================================
-# 2. 상태 이벤트 로그 구조 (ROS 패턴)
-# ==========================================
-
+# =========================================================
+# 2. DataFrame Schema Contracts (데이터프레임 컬럼 명세서)
+# =========================================================
 @dataclass
-class StageEvent:
-    stage: Stage
-    status: Status
-    timestamp: datetime = field(default_factory=datetime.now)
-
-# ==========================================
-# 3. 단계별 데이터 파이프라인 규격(Metrics)
-# ==========================================
-
-@dataclass
-class SectorProfile:
-    """1단계: 섹터 단위 소외도 및 낙폭 가속(Value Trap) 정보"""
-    sector_name: str
-    base_date: date
+class SectorMetrics:
+    """Stage 1 (소외 섹터 발굴) 출력 DataFrame 스키마 명세"""
+    sector: str
     return_z_score: float
     volume_z_score: float
     composite_score: float
     is_value_trap_warning: bool
+    fail_reason: Optional[str] = None
 
 @dataclass
 class QualityMetrics:
-    """2단계: 섹터 내 우량성 및 실적 안정성"""
+    """Stage 2 (섹터 내 우량주 탐색) 출력 DataFrame 스키마 명세"""
     roe: float
     roic: float
     op_margin_std: float
-    na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
+    na_reasons: str = ""
+    fail_reason: Optional[str] = None
 
 @dataclass
 class TurnaroundMetrics:
-    """3단계: 체질 개선 — Composite Score 기반 (2026-08-03 이진 컷오프 → Z-score 가중합산 전환)"""
-    sga_yoy_avg: float           # 판관비율 YoY 증감의 q1/q2 평균 (구 sga_ratio_yoy_q1/q2 통합)
+    """Stage 3 (턴어라운드) 출력 DataFrame 스키마 명세"""
+    sga_yoy_avg: float
     sales_growth_yoy: float
     gpm_yoy: float
-    stage3_score: float          # composite score 산출 결과
-    is_cost_cutting_warning: bool  # 매출 역성장 동반 시 경고 (탈락 아님)
-
-    # 구형 이진 컷오프 시절 필드 — composite score로 대체되어 삭제:
-    #   is_sga_decreasing_consecutively (완전 삭제, 복원 불필요)
-
-    # 재고회전율: 현재 필터 비활성(require_inventory_turnover_up=false)이나
-    # 알파 팩터로 재도입 가능성이 높아 Optional로 보존
+    stage3_score: float
+    is_cost_cutting_warning: bool
     inventory_turnover_yoy: Optional[float] = None
-
-    na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
+    na_reasons: dict = field(default_factory=dict)
 
 @dataclass
 class ValuationMetrics:
-    """4단계: 밸류에이션 — Composite Score 기반 (2026-08-03 전환)"""
+    """Stage 4 (밸류에이션) 출력 DataFrame 스키마 명세"""
     pbr: float
-    bps_growth_yoy: float
+    per: Optional[float]
+    bps_growth: float
     stage4_score: float
-    is_pbr_value_trap: bool      # 저PBR+저ROE 경고 (탈락 아님)
-    na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
+    is_pbr_value_trap: bool
 
 @dataclass
 class FinancialHealthMetrics:
-    """5단계: 재무 건전성 — Composite Score 기반, Pool 상대평가 (2026-08-04 전환)"""
+    """Stage 5 (재무 건전성) 출력 DataFrame 스키마 명세"""
     debt_ratio: float
     ocf: float
     net_income: float
     interest_coverage_ratio: float
     stage5_score: float
-
-    # warning_tags(비즈니스/퀀트 판단 경고)와 na_reasons(엔지니어링/데이터 상태)는
-    # 성격이 달라 의도적으로 분리 유지 — 관심사의 분리(SoC) 원칙
-    # 예: "[ICR미달]", "[과다부채]", "[이익질주의]"
-    warning_tags: list[str] = field(default_factory=list)
-
-    na_reasons: dict[str, tuple[MetricStatus, Optional[str]]] = field(default_factory=dict)
-
-# ==========================================
-# 4. 파이프라인 메인 데이터 객체
-# ==========================================
-
-@dataclass
-class BasicInfo:
-    """종목의 기본 식별, 시장 정보 및 기준 시점"""
-    ticker: str
-    name: str
-    sector: str
-    market_cap: float
-    close_price: float
-    base_date: date
-
-@dataclass
-class StockProfile:
-    """파이프라인 전체를 관통하는 메인 데이터 규격 (State Machine)"""
-    info: BasicInfo
-    sector_info: Optional[SectorProfile] = None
-    quality: Optional[QualityMetrics] = None
-    turnaround: Optional[TurnaroundMetrics] = None
-    valuation: Optional[ValuationMetrics] = None
-    health: Optional[FinancialHealthMetrics] = None
-
-    # 이벤트 스트림 이력 관리
-    history: list[StageEvent] = field(default_factory=list)
-
-    # 파이프라인 전체 탈락 사유 독립 보존 (추후 FailReason Enum 고도화 가능 지점)
+    warning_tags: str = ""
+    na_reasons: str = ""
     fail_reason: Optional[str] = None
 
-    # [명확화] 데이터 시차(Lag) 관리: 종목 기준일과 섹터 기준일의 차이
-    sector_data_lag_days: Optional[int] = None
+# =========================================================
+# 3. Dynamic Column Accessors (컬럼명 자동 완성 네임스페이스)
+# =========================================================
+# dataclass의 필드명으로부터 문자열 상수를 자동 생성 (이중 타이핑 오타 방지)
+SectorCols = SimpleNamespace(**{f.name: f.name for f in fields(SectorMetrics)})
+QualityCols = SimpleNamespace(**{f.name: f.name for f in fields(QualityMetrics)})
+TurnaroundCols = SimpleNamespace(**{f.name: f.name for f in fields(TurnaroundMetrics)})
+ValuationCols = SimpleNamespace(**{f.name: f.name for f in fields(ValuationMetrics)})
+HealthCols = SimpleNamespace(**{f.name: f.name for f in fields(FinancialHealthMetrics)})
 
-    def __post_init__(self):
-        """객체 생성 시 PENDING 상태를 이력의 첫 줄에 기록"""
-        if not self.history:
-            self._record_event(Stage.PENDING, Status.IN_PROGRESS)
-
-    @property
-    def current_stage(self) -> Stage:
-        """가장 최근 기록된 단계를 반환하는 편의 프로퍼티"""
-        return self.history[-1].stage if self.history else Stage.PENDING
-
-    def _record_event(self, stage: Stage, status: Status):
-        """내부 메서드: 상태 전이 이벤트를 로그에 Append"""
-        self.history.append(StageEvent(stage=stage, status=status))
-
-    def inject_sector_info(self, sector_info: SectorProfile):
-        """섹터 정보 주입 시 미래 데이터(Look-ahead bias) 침투 방어 및 로깅"""
-        if sector_info.base_date > self.info.base_date:
-            raise ValueError(
-                f"[미래 데이터 침투] 섹터 기준일({sector_info.base_date})이 "
-                f"종목 기준일({self.info.base_date})보다 미래일 수 없습니다."
-            )
-        self.sector_info = sector_info
-        self.sector_data_lag_days = (self.info.base_date - sector_info.base_date).days
-
-        # 하드코딩 제거: 현재 시점의 stage를 동적으로 추적하여 이벤트 기록
-        self._record_event(self.current_stage, Status.DATA_INJECTED)
-
-    def advance_stage(self, next_stage: Stage):
-        """현재 단계를 PASSED로 마감하고 다음 단계를 IN_PROGRESS로 시작.
-        이미 실격(FAILED) 처리된 종목은 다음 단계로 넘어갈 수 없도록 가드."""
-        if self.fail_reason is not None:
-            raise RuntimeError(
-                f"이미 실패 처리된 종목입니다 (사유: {self.fail_reason}). "
-                f"advance_stage()를 호출할 수 없습니다."
-            )
-        if self.history:
-            self._record_event(self.current_stage, Status.PASSED)
-
-        self._record_event(next_stage, Status.IN_PROGRESS)
-
-    def mark_failed(self, reason: str):
-        """현재 단계에서 탈락(FAILED) 처리 및 사유를 전용 필드에 저장"""
-        if self.history:
-            self._record_event(self.current_stage, Status.FAILED)
-
-        # MetricStatus(CAUTION) 오염 방지를 위해 전용 임시 필드 사용
-        self.fail_reason = reason
-
-    def mark_completed(self):
-        """전체 파이프라인 종결"""
-        if self.history:
-            self._record_event(self.current_stage, Status.PASSED)
-
-        self._record_event(Stage.COMPLETED, Status.PASSED)
+# =========================================================
+# 4. Validation Helpers (데이터프레임 무결성 검증 도구)
+# =========================================================
+def validate_schema(df, dataclass_type) -> bool:
+    """DataFrame이 해당 dataclass에 정의된 모든 컬럼을 포함하는지 검증합니다."""
+    required_cols = {f.name for f in fields(dataclass_type)}
+    missing_cols = required_cols - set(df.columns)
+    
+    assert not missing_cols, f"❌ 스키마 검증 실패: 다음 컬럼이 누락되었습니다 -> {missing_cols}"
+    return True

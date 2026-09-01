@@ -3,6 +3,14 @@ import numpy as np
 import logging
 from core.metrics_utils import calc_zscore, compute_composite_score, apply_percentile_filter
 
+from core.schema import (
+    TurnaroundCols, 
+    TurnaroundMetrics, 
+    FailReason, 
+    MetricStatus, 
+    validate_schema
+)
+
 class FundamentalImproveScreener:
     """
     3단계: 체질 개선 (Turnaround)
@@ -17,7 +25,7 @@ class FundamentalImproveScreener:
         self.sga_weight = params.get('sga_weight', 0.4)
         self.gpm_weight = params.get('gpm_weight', 0.2)
         self.pass_percentile = params.get('composite_pass_percentile', 0.3)
-        self.sales_decline_threshold = params.get('cost_cutting_only_sales_decline_threshold', -0.05)
+        self.sales_decline_threshold = params.get('cost_cutting_only_sales_decline_threshold', 0.00)
         
         self.logger = logging.getLogger(__name__)
 
@@ -33,12 +41,19 @@ class FundamentalImproveScreener:
             
             na_reasons = []
             
-            if len(q_series) < 6 or all(pd.isna(q_series[0].get('revenue', np.nan)) for _ in range(6)):
-                na_reasons.append("DATA_TOO_SHORT")
+            # 🔴 버그 2 수정: q_series[0]만 반복 검사하던 논리 오류 해결
+            if len(q_series) < 6 or all(pd.isna(q.get('revenue', np.nan)) for q in q_series[:6]):
+                na_reasons['DATA_TOO_SHORT'] = (MetricStatus.NOT_COMPUTABLE, "최근 6분기 재무 데이터 부족")
                 metrics_data.append({
-                    'ticker': ticker, 'sector': sector,
-                    'sga_yoy_avg': np.nan, 'sales_growth_yoy': np.nan, 'gpm_yoy': np.nan,
-                    'na_reasons': ",".join(na_reasons)
+                    'ticker': ticker, 
+                    'sector': sector,
+                    TurnaroundCols.sga_yoy_avg: np.nan, 
+                    TurnaroundCols.sales_growth_yoy: np.nan, 
+                    TurnaroundCols.gpm_yoy: np.nan,
+                    TurnaroundCols.stage3_score: np.nan,
+                    TurnaroundCols.is_cost_cutting_warning: False,
+                    TurnaroundCols.inventory_turnover_yoy: np.nan, # 스키마 요구사항(Optional)
+                    TurnaroundCols.na_reasons: na_reasons
                 })
                 continue
 
@@ -64,18 +79,25 @@ class FundamentalImproveScreener:
             # --- 매출총이익률 (GPM) ---
             gp_t0 = q_series[0].get('gross_profit', np.nan)
             if pd.isna(gp_t0):
-                na_reasons.append("TURNAROUND_NOT_COMPUTABLE")
+                na_reasons['TURNAROUND_NOT_COMPUTABLE'] = (MetricStatus.NOT_COMPUTABLE, "GPM 계산 불가")
             
             gpm_t0 = safe_div(gp_t0, rev_t0)
             gpm_t4 = safe_div(q_series[4].get('gross_profit', np.nan), rev_t4)
             gpm_yoy = gpm_t0 - gpm_t4
 
+            # 경고 태그 (매출 역성장)
+            is_cost_cutting_warning = bool(pd.notna(sales_growth_yoy) and sales_growth_yoy <= self.sales_decline_threshold)
+
             metrics_data.append({
-                'ticker': ticker, 'sector': sector,
-                'sga_yoy_avg': sga_yoy_avg,
-                'sales_growth_yoy': sales_growth_yoy,
-                'gpm_yoy': gpm_yoy,
-                'na_reasons': ",".join(na_reasons)
+                'ticker': ticker, 
+                'sector': sector,
+                TurnaroundCols.sga_yoy_avg: sga_yoy_avg,
+                TurnaroundCols.sales_growth_yoy: sales_growth_yoy,
+                TurnaroundCols.gpm_yoy: gpm_yoy,
+                TurnaroundCols.stage3_score: np.nan,
+                TurnaroundCols.is_cost_cutting_warning: is_cost_cutting_warning,
+                TurnaroundCols.inventory_turnover_yoy: np.nan,
+                TurnaroundCols.na_reasons: na_reasons
             })
 
         df = pd.DataFrame(metrics_data)
@@ -84,26 +106,43 @@ class FundamentalImproveScreener:
         # ---------------------------------------------------------
         # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------
-        df['sales_z'] = calc_zscore(df['sales_growth_yoy'])
-        df['sga_inv_z'] = calc_zscore(-df['sga_yoy_avg']) # 판관비 증가는 나쁘므로 부호 반전
-        df['gpm_z'] = calc_zscore(df['gpm_yoy'])
+        df['sales_z'] = calc_zscore(df[TurnaroundCols.sales_growth_yoy])
+        df['sga_inv_z'] = calc_zscore(-df[TurnaroundCols.sga_yoy_avg]) # 판관비 증가는 나쁘므로 부호 반전
+        df['gpm_z'] = calc_zscore(df[TurnaroundCols.gpm_yoy])
         
         weights = {'sales_z': self.sales_weight, 'sga_inv_z': self.sga_weight, 'gpm_z': self.gpm_weight}
-        df['stage3_score'] = compute_composite_score(df, weights)
+        df[TurnaroundCols.stage3_score] = compute_composite_score(df, weights)
+        df.drop(columns=['sales_z', 'sga_inv_z', 'gpm_z'], inplace=True)
         
-        # 구제 대상 태깅 (NOT_COMPUTABLE)
-        is_exempt = df['na_reasons'].astype(str).str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
-        df.loc[is_exempt, 'stage3_score'] = np.nan
+        # 🔴 버그 1 수정: 행을 삭제하지 않고 fail_reason 컬럼으로 이력 관리
+        df['fail_reason'] = None
         
-        # 경고 태그 (매출 역성장)
-        df['is_cost_cutting_warning'] = df['sales_growth_yoy'] <= self.sales_decline_threshold
+        na_reasons_str = df[TurnaroundCols.na_reasons].astype(str)
+        is_data_short = na_reasons_str.str.contains('DATA_TOO_SHORT', na=False)
+        is_exempt = na_reasons_str.str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
         
-        # 퍼센타일 컷오프 (결측치 구제 포함)
-        passed_df, _ = apply_percentile_filter(df, 'stage3_score', self.pass_percentile)
+        # 구제 대상 점수 NaN 처리
+        df.loc[is_exempt, TurnaroundCols.stage3_score] = np.nan
         
-        # Status 로깅 (선택적)
-        passed_df.loc[passed_df['stage3_score'].isna(), 'stage3_status'] = 'EXEMPT'
-        passed_df.loc[passed_df['stage3_score'].notna(), 'stage3_status'] = 'PASSED'
+        # 데이터 부족 종목 기계적 탈락 처리
+        df.loc[is_data_short, 'fail_reason'] = FailReason.DATA_TOO_SHORT.value
 
-        self.logger.info(f"[Stage 3] {len(df)}개 종목 중 {len(passed_df)}개 턴어라운드 종목 통과 (상위 {self.pass_percentile*100}%)")
-        return passed_df
+        # 점수 기반 컷오프 산출 (데이터 부족 및 구제 대상 제외)
+        valid_mask = ~is_data_short & ~is_exempt
+        if valid_mask.any():
+            cutoff_val = df.loc[valid_mask, TurnaroundCols.stage3_score].quantile(1.0 - self.pass_percentile)
+            
+            # 컷오프 미달 탈락 처리
+            is_below_cutoff = valid_mask & (df[TurnaroundCols.stage3_score] < cutoff_val)
+            df.loc[is_below_cutoff, 'fail_reason'] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
+
+        # Status 로깅을 위한 변수 할당
+        passed_count = df['fail_reason'].isnull().sum()
+        self.logger.info(f"[Stage 3] {len(df)}개 종목 중 {passed_count}개 턴어라운드 종목 통과 (상위 {self.pass_percentile*100}%)")
+        
+        # ---------------------------------------------------------
+        # 4. 스키마 무결성 검증 (출하 전 최종 확인)
+        # ---------------------------------------------------------
+        validate_schema(df, TurnaroundMetrics)
+        
+        return df

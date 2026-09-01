@@ -3,6 +3,7 @@ import numpy as np
 import logging
 # [수정] utils 및 Status 추가 임포트
 from core.metrics_utils import compute_std, MetricStatus
+from core.schema import QualityCols, QualityMetrics, FailReason, validate_schema
 
 class SectorLeaderScreener:
     """
@@ -91,11 +92,17 @@ class SectorLeaderScreener:
         # [추가] 예외 처리: 신규 상장 등으로 영업이익률 시계열이 부족한 종목 구제
         cond_op_vol_exempt = df['na_reasons'].astype(str).str.contains('OP_MARGIN_STD_NOT_COMPUTABLE', na=False)
 
-        # 최종 조건 결합
-        passed_df = df[cond_roe & (cond_roic | cond_roic_exempt) & (cond_op_vol | cond_op_vol_exempt)].copy()
+        # 최종 조건 결합 — 탈락 종목도 fail_reason 태깅 후 보존 (row 삭제 안 함)
+        is_passed = cond_roe & (cond_roic | cond_roic_exempt) & (cond_op_vol | cond_op_vol_exempt)
+        df[QualityCols.fail_reason] = None
+        df.loc[~is_passed, QualityCols.fail_reason] = FailReason.QUALITY_CUTOFF_NOT_MET.value
 
-        self.logger.info(f"[Stage 2] {len(df)}개 종목 중 {len(passed_df)}개 우량주 통과")
-        
+        passed_count = df[QualityCols.fail_reason].isnull().sum()
+        self.logger.info(f"[Stage 2] {len(df)}개 종목 중 {passed_count}개 우량주 통과")
+
         # 반환할 컬럼 정리 (필요에 따라 확장)
-        schema_columns = ['ticker', 'sector', 'roe', 'roic', 'op_margin_std', 'na_reasons']
-        return passed_df[schema_columns]
+        schema_columns = ['ticker', 'sector', 'roe', 'roic', 'op_margin_std', 'na_reasons', 'fail_reason']
+        result = df[schema_columns]
+
+        validate_schema(result, QualityMetrics)
+        return result

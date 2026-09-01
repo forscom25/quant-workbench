@@ -2,6 +2,9 @@ import pandas as pd
 import numpy as np
 import logging
 from core import metrics_utils
+from core.schema import HealthCols, FinancialHealthMetrics, FailReason, validate_schema
+
+FINANCE_SECTOR_CAUTION = "FINANCE_SECTOR_CAUTION"
 
 class FinancialHealthScreener:
     """
@@ -49,7 +52,7 @@ class FinancialHealthScreener:
                     icr = np.divide(op_inc, int_exp)
 
             if any(keyword in str(sector) for keyword in ['금융', '증권', '보험', '은행', '지주']):
-                na_reasons.append(metrics_utils.MetricStatus.CAUTION)
+                na_reasons.append(FINANCE_SECTOR_CAUTION)
 
             metrics_data.append({
                 'ticker': ticker,
@@ -74,7 +77,7 @@ class FinancialHealthScreener:
         df.loc[(df['ocf'] < df['net_income'].fillna(-np.inf)), 'warning_tags'] += "[이익질주의]"
         
         df['debt_rank_pct'] = df.groupby('sector')['debt_ratio'].rank(pct=True, ascending=True)
-        cond_not_finance = ~df['na_reasons'].astype(str).str.contains(metrics_utils.MetricStatus.CAUTION)
+        cond_not_finance = ~df['na_reasons'].astype(str).str.contains(FINANCE_SECTOR_CAUTION, na=False)
         df.loc[cond_not_finance & (df['debt_rank_pct'] > 0.90), 'warning_tags'] += "[과다부채]"
 
         # ---------------------------------------------------------
@@ -89,26 +92,32 @@ class FinancialHealthScreener:
         score_mapping = {'icr_zscore': self.icr_weight, 'debt_zscore': self.debt_weight}
         df['stage5_score'] = metrics_utils.compute_composite_score(df, score_mapping)
 
-        cond_finance = df['na_reasons'].str.contains(metrics_utils.MetricStatus.CAUTION)
+        cond_finance = df['na_reasons'].str.contains(FINANCE_SECTOR_CAUTION, na=False)
         df.loc[cond_finance, 'stage5_score'] = df.loc[cond_finance, 'icr_zscore']
 
         # ---------------------------------------------------------
-        # 4. 상대 평가 필터링 (하위 20% 탈락)
+        # 4. 상대 평가 필터링 (하위 20% 탈락) — 탈락 종목도 fail_reason 태깅 후 보존
         # ---------------------------------------------------------
-        top_percentile = 1.0 - self.cutoff_quantile 
+        top_percentile = 1.0 - self.cutoff_quantile
+
+        df[HealthCols.fail_reason] = None
 
         if len(df) > 5:
-            passed_df, threshold = metrics_utils.apply_percentile_filter(df, 'stage5_score', top_percentile)
-        else:
-            passed_df = df.copy()
-            threshold = 0.0
+            cutoff_val = df['stage5_score'].dropna().quantile(1.0 - top_percentile)
+            is_below_cutoff = df['stage5_score'].notna() & (df['stage5_score'] < cutoff_val)
+            df.loc[is_below_cutoff, HealthCols.fail_reason] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
+        # 표본이 5개 이하면 상대평가 자체가 무의미하므로 전원 통과(fail_reason=None 유지)
 
-        self.logger.info(f"[Stage 5] {len(df)}개 중 {len(passed_df)}개 생존 (Threshold: {threshold:.3f})")
-        
+        passed_count = df[HealthCols.fail_reason].isnull().sum()
+        self.logger.info(f"[Stage 5] {len(df)}개 중 {passed_count}개 생존")
+
         # 이전 스테이지 데이터 보존
         schema_columns = [
-            'ticker', 'sector', 'debt_ratio', 'ocf', 'net_income', 
-            'interest_coverage_ratio', 'stage5_score', 'warning_tags', 'na_reasons'
+            'ticker', 'sector', 'debt_ratio', 'ocf', 'net_income',
+            'interest_coverage_ratio', 'stage5_score', 'warning_tags', 'na_reasons', 'fail_reason'
         ]
         final_cols = list(set(input_df.columns.tolist() + schema_columns))
-        return passed_df[[c for c in final_cols if c in passed_df.columns]]
+        result = df[[c for c in final_cols if c in df.columns]]
+
+        validate_schema(result, FinancialHealthMetrics)
+        return result
