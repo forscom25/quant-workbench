@@ -19,6 +19,7 @@ class SectorLeaderScreener:
         # [수정] 시계열 통계 계산용 파라미터 추가
         self.op_margin_lookback_q = params.get('op_margin_lookback_q', 8)
         self.op_margin_min_quarters = params.get('op_margin_min_quarters', 4)
+        self.effective_tax_rate = params.get('effective_tax_rate', 0.22)
 
         self.logger = logging.getLogger(__name__)
 
@@ -42,9 +43,13 @@ class SectorLeaderScreener:
             # 비율 계산 (ROE, ROIC) - ZeroDivisionError 등을 막기 위해 np.divide 사용
             roe = np.divide(raw_ttm.get('net_income', np.nan), raw_ttm.get('total_equity', np.nan))
             
-            effective_tax_rate = 0.22 # 임시 법인세율
-            roic_num = raw_ttm.get('operating_income', np.nan) * (1 - effective_tax_rate)
-            roic_den = raw_ttm.get('total_assets', np.nan) - raw_ttm.get('total_liabilities', np.nan)
+            roic_num = raw_ttm.get('operating_income', np.nan) * (1 - self.effective_tax_rate)
+            # 투하자본 = 이자부 차입금(total_borrowings) + 자기자본(total_equity).
+            # (과거 total_assets - total_liabilities로 계산했으나 이는 회계항등식상 자기자본과
+            # 동일해 실질적으로 ROIC가 아닌 ROE의 변형이었음 — data/cache 실데이터로 확인 후 수정)
+            total_borrowings = raw_ttm.get('total_borrowings', np.nan)
+            total_borrowings = 0.0 if pd.isna(total_borrowings) else total_borrowings
+            roic_den = total_borrowings + raw_ttm.get('total_equity', np.nan)
             roic = np.divide(roic_num, roic_den)
             
             # 영업이익률 변동성(표준편차) 계산 (utils 활용)

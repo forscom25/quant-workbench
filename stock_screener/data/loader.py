@@ -14,17 +14,25 @@ from typing import Optional, Dict
 import warnings
 
 class QuantDataLoader:
-    def __init__(self, use_cache: bool = True, cache_days: int = 30):
+    def __init__(self, use_cache: bool = True, cache_days: int = 30,
+                 ttm_denominator: str = "latest_snapshot"):
         load_dotenv()
         self.dart_key = os.getenv("DART_API_KEY")
         self.krx_key = os.getenv("KRX_API_KEY")
-        
+
         if not self.dart_key:
             raise ValueError("[오류] DART_API_KEY가 .env 파일에 없습니다.")
-            
+
         self.dart = OpenDartReader(self.dart_key)
         self.use_cache = use_cache
         self.cache_days = cache_days
+
+        # params.yaml의 global.ttm_denominator에 대응 — TTM(4분기 합산) 분자와 짝지을 BS 분모를
+        # 가장 최근 분기말 스냅샷으로 볼지("latest_snapshot"), 4개 분기 평균으로 볼지("avg_4q").
+        # avg_4q는 자사주 매입/유상증자 등으로 중간에 분모가 급변하는 경우의 외란을 완화한다.
+        if ttm_denominator not in ("latest_snapshot", "avg_4q"):
+            raise ValueError(f"ttm_denominator는 'latest_snapshot' 또는 'avg_4q'여야 합니다: {ttm_denominator}")
+        self.ttm_denominator = ttm_denominator
 
         # 🚨 수정된 부분: loader.py 파일의 위치(data 폴더)를 기준으로 절대 경로 고정
         base_dir = Path(__file__).resolve().parent
@@ -105,10 +113,31 @@ class QuantDataLoader:
                 "ids": ["ifrs-full_Equity"],
                 "names": ["자본총계"]
                 },
-            "interest_expense": { # 이자비용
+            "interest_expense": {
+                # 이자비용. 우선순위: ①정확계정 → ②P&L "이자비용" 세부항목
+                # → ③현금흐름표 이자지급 조정 라인(cf_ids) → ④광의 금융비용(fallback_names, 최후 수단).
+                # data/cache 표본 검증 결과 "금융비용/금융원가"를 그대로 쓰면 FX·파생 손익이 섞여
+                # 실제 이자지급액 대비 수십~수백 배 괴리가 나는 종목이 다수(150개 중 87개) 확인됨.
                 "sj": "IS",
                 "ids": ["ifrs-full_InterestExpense", "dart_InterestExpense"],
-                "names": ["금융원가", "금융비용", "이자비용"]
+                "names": ["이자비용"],
+                "cf_ids": ["dart_AdjustmentsForInterestExpenses", "ifrs-full_InterestPaidClassifiedAsOperatingActivities"],
+                "fallback_names": ["금융원가", "금융비용"],
+                },
+            "total_borrowings": {
+                # 총차입금 (ROIC 투하자본 계산용). 회사마다 유동/비유동/사채 등으로 계정이 쪼개져
+                # 보고되므로 매칭되는 모든 행을 합산한다(단일 최고 매치가 아님). 매치 실패 시 무차입으로 간주(0).
+                "sj": "BS",
+                "ids": [
+                    "ifrs-full_ShorttermBorrowings", "ifrs-full_LongtermBorrowings",
+                    "ifrs-full_CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings",
+                    "ifrs-full_CurrentPortionOfLongtermBorrowings",
+                    "ifrs-full_NoncurrentPortionOfNoncurrentLoansReceived",
+                    "ifrs-full_CurrentLoansReceivedAndCurrentPortionOfNoncurrentLoansReceived",
+                    "dart_LongTermBorrowingsGross",
+                    "ifrs_ShorttermBorrowings",
+                    ],
+                "names": ["차입금", "사채"],
                 }
         }
 
@@ -148,8 +177,15 @@ class QuantDataLoader:
     def get_kospi_universe(self, base_date: date) -> pd.DataFrame:
         """
         [미래 정보 참조 방지 및 하이브리드 매핑 적용]
-        Point-in-Time 유니버스를 생성하며, 성능 향상을 위한 캐싱과 
+        Point-in-Time 유니버스를 생성하며, 성능 향상을 위한 캐싱과
         생존편향(Survivorship Bias) 모니터링 로직을 포함합니다.
+
+        [알려진 한계] ticker/close_price/market_cap은 base_date 기준 point-in-time 데이터이지만,
+        sector(업종)는 아니다 — fdr.StockListing('KRX-DESC')가 날짜 인자를 받지 않아 항상
+        "캐시를 생성한 시점"의 현재 업종 분류가 모든 base_date에 동일하게 붙는다. 실제로
+        2019-09-30 vs 2025-09-30 캐시를 비교해도 공통 종목 747개 전부 섹터가 동일함을 확인함
+        (KRX 업종 재분류가 드물게만 일어나 실질적 영향은 제한적일 것으로 판단, 2026-09-06 검토).
+        완전한 해결은 과거 시점 업종 분류를 제공하는 데이터 소스가 필요해 현재 범위 밖으로 보류.
         """
         date_str = self._get_nearest_past_bday(base_date)
         cache_file = self.cache_dir / f"universe_{date_str}.csv"
@@ -174,6 +210,8 @@ class QuantDataLoader:
         names = {t: stock.get_market_ticker_name(t) for t in df['ticker'].unique()}
         df['name'] = df['ticker'].map(names)
         
+        # ⚠️ 날짜 인자 없음 — base_date와 무관하게 항상 "현재" 업종 분류를 반환함.
+        # point-in-time이 아니라는 한계를 이 함수 docstring에 명시함 (알려진 한계 참고).
         fdr_df = fdr.StockListing('KRX-DESC')[['Code', 'Industry']]
         fdr_df.columns = ['ticker', 'sector']
         
@@ -235,17 +273,31 @@ class QuantDataLoader:
         df = pd.merge(df, df_6m, on='ticker', how='left')
         df = pd.merge(df, df_1y, on='ticker', how='left')
         
-        # 3. 섹터별 집계 (수익률은 동일가중 평균, 거래대금은 단순 합산)
+        # 3. 섹터별 집계 (수익률은 시가총액가중 평균, 거래대금은 단순 합산)
+        # 과거엔 종목 단순평균(mean)을 썼는데, 이러면 저유동성 소형주 몇 개가 섹터 전체의
+        # "소외도" 신호를 왜곡할 수 있어 시가총액가중으로 교체함 (screening_criteria.md 설계 원칙과 일치).
+        # 결측 수익률 종목은 분자(가중합)에서 자연히 빠지고, 분모(가중치 합)에서도 함께 제외되도록
+        # market_cap을 NaN으로 마스킹한 보조 컬럼으로 가중평균을 벡터화 연산한다.
         market_vol_1m = df['vol_1m'].sum()
         market_vol_1y = df['vol_1y'].sum()
-        
+
+        df['_w_return_1m'] = df['return_1m'] * df['market_cap']
+        df['_w_return_6m'] = df['return_6m'] * df['market_cap']
+        df['_w_cap_1m'] = df['market_cap'].where(df['return_1m'].notna())
+        df['_w_cap_6m'] = df['market_cap'].where(df['return_6m'].notna())
+
         sector_group = df.groupby('sector').agg(
-            return_1m=('return_1m', 'mean'),
-            return_6m=('return_6m', 'mean'),
+            _wsum_return_1m=('_w_return_1m', 'sum'),
+            _wsum_return_6m=('_w_return_6m', 'sum'),
+            _wcap_1m=('_w_cap_1m', 'sum'),
+            _wcap_6m=('_w_cap_6m', 'sum'),
             sector_vol_1m=('vol_1m', 'sum'),
-            sector_vol_1y=('vol_1y', 'sum')
+            sector_vol_1y=('vol_1y', 'sum'),
         ).reset_index()
-        
+
+        sector_group['return_1m'] = sector_group['_wsum_return_1m'] / sector_group['_wcap_1m']
+        sector_group['return_6m'] = sector_group['_wsum_return_6m'] / sector_group['_wcap_6m']
+
         # 4. 시장 전체 대비 거래대금 비중 산출
         sector_group['vol_prop_1m'] = sector_group['sector_vol_1m'] / market_vol_1m
         sector_group['vol_prop_1y'] = sector_group['sector_vol_1y'] / market_vol_1y
@@ -286,6 +338,83 @@ class QuantDataLoader:
                 time.sleep(1)
         return None
 
+    def _extract_amount(self, row, target_df: pd.DataFrame, prefer_cumulative: bool) -> float:
+        """
+        한 행(row)에서 금액을 파싱합니다.
+        prefer_cumulative=True(IS/CF 계정)면 분기 누적치(thstrm_add_amount)를 우선 사용하고,
+        없으면 기본 컬럼(thstrm_amount)으로 폴백합니다.
+        """
+        amount = float('nan')
+
+        if prefer_cumulative and 'thstrm_add_amount' in target_df.columns and pd.notna(row.get('thstrm_add_amount')):
+            add_amt_str = str(row['thstrm_add_amount']).replace(',', '').strip()
+            try:
+                amount = float(add_amt_str)
+            except ValueError:
+                pass
+
+        if pd.isna(amount):
+            amt_str = str(row.get('thstrm_amount', '')).replace(',', '').strip()
+            try:
+                amount = float(amt_str)
+            except ValueError:
+                pass
+
+        return amount
+
+    def _match_account(self, df_subset: pd.DataFrame, target_df: pd.DataFrame, ids=None, names=None,
+                        prefer_cumulative: bool = True) -> float:
+        """
+        df_subset(특정 sj_div로 이미 필터링된 행들)에서 계정 하나를 찾아 금액을 반환합니다.
+        정확한 account_id 매치를 이름 부분 문자열 매치보다 항상 우선시합니다 — DART 원본 파일 내
+        행 등장 순서에 결과가 좌우되지 않도록 하기 위함입니다(자세한 배경은 ACCOUNT_MAPPING의
+        interest_expense 주석 참고).
+        """
+        ids = ids or []
+        names = names or []
+
+        # 1차: 정확한 account_id 매치
+        if ids:
+            id_matched = df_subset[df_subset['account_id'].astype(str).str.strip().isin(ids)]
+            for _, row in id_matched.iterrows():
+                amount = self._extract_amount(row, target_df, prefer_cumulative)
+                if pd.notna(amount):
+                    return amount
+
+        # 2차: 계정명 부분 문자열 매치
+        if names:
+            for _, row in df_subset.iterrows():
+                acc_nm = str(row.get('account_nm', '')).strip()
+                if any(name in acc_nm for name in names):
+                    amount = self._extract_amount(row, target_df, prefer_cumulative)
+                    if pd.notna(amount):
+                        return amount
+
+        return float('nan')
+
+    def _sum_matching_accounts(self, df_subset: pd.DataFrame, target_df: pd.DataFrame, ids=None, names=None) -> float:
+        """
+        df_subset 내에서 ids 또는 names에 매치되는 '모든' 행의 금액을 합산합니다.
+        차입금처럼 유동/비유동/사채 등 여러 행으로 쪼개져 보고되는 계정을 합산할 때 사용합니다
+        (단일 최고 매치만 찾는 _match_account와 달리 전부 더함). 매치되는 행이 하나도 없으면
+        0.0을 반환합니다(무차입으로 간주 — NaN을 반환하면 부채 없는 우량 기업이 오히려
+        ROIC_NOT_COMPUTABLE로 구제 처리되어 버리는 부작용이 생김).
+        """
+        ids = set(ids or [])
+        names = names or []
+        total = 0.0
+
+        for _, row in df_subset.iterrows():
+            acc_id = str(row.get('account_id', '')).strip()
+            acc_nm = str(row.get('account_nm', '')).strip()
+
+            if acc_id in ids or any(n in acc_nm for n in names):
+                amount = self._extract_amount(row, target_df, prefer_cumulative=False)
+                if pd.notna(amount):
+                    total += amount
+
+        return total
+
     def parse_standardized_financials(self, ticker: str, year: int, report_code: str = '11011', base_date: Optional[date] = None) -> Dict[str, float]:
         """
         base_date가 제공될 경우 공시 시차(Disclosure Lag)를 검증하여, 
@@ -305,61 +434,83 @@ class QuantDataLoader:
 
         # ---------------------------------------------------------
         # [핵심 로직] 공시 시차 검증 (Look-ahead bias 방지)
+        # 이 프로젝트에서 미래 데이터 유입을 막는 유일한 안전장치이므로 fail-closed 원칙을 적용한다:
+        # 공시일을 확인할 수 없는 경우(컬럼 누락, 파싱 실패 등) 검증을 조용히 건너뛰고 데이터를
+        # 그대로 쓰는 대신, 안전하게 실패(NaN)시켜 해당 종목이 구제 없이 계산 불가 처리되도록 한다.
+        # 이유: 검증 스킵으로 인한 미래 데이터 오염이 종목 하나 계산 누락보다 훨씬 치명적임.
         # ---------------------------------------------------------
-        if base_date is not None and 'rcept_no' in target_df.columns:
+        if base_date is not None:
+            if 'rcept_no' not in target_df.columns:
+                self.logger.error(
+                    f"[공시 시차 검증 불가] {ticker}의 {year}년 {report_code} 보고서에 rcept_no "
+                    f"컬럼이 없어 공시 시점을 확인할 수 없습니다. 미래참조 위험을 피하기 위해 "
+                    f"안전하게 실패(NaN) 처리합니다."
+                )
+                return standard_metrics
+
             try:
                 # DART rcept_no의 앞 8자리는 접수일자(YYYYMMDD)
                 rcept_no = str(target_df['rcept_no'].iloc[0])
                 rcept_dt = datetime.strptime(rcept_no[:8], "%Y%m%d").date()
-                
-                if rcept_dt > base_date:
-                    self.logger.warning(
-                        f"[미래참조 방지] {ticker}의 {year}년 {report_code} 보고서는 "
-                        f"{base_date} 시점에 미공시 상태입니다. (실제 공시일: {rcept_dt})"
-                    )
-                    return standard_metrics # 공시 전이므로 빈 껍데기(NaN) 반환
             except Exception as e:
-                self.logger.error(f"[공시일 파싱 오류] {ticker}: {e}")
-        
+                self.logger.error(
+                    f"[공시일 파싱 오류] {ticker}: {e} — 공시 시점을 확인할 수 없어 "
+                    f"미래참조 위험을 피하기 위해 안전하게 실패(NaN) 처리합니다."
+                )
+                return standard_metrics
+
+            if rcept_dt > base_date:
+                self.logger.warning(
+                    f"[미래참조 방지] {ticker}의 {year}년 {report_code} 보고서는 "
+                    f"{base_date} 시점에 미공시 상태입니다. (실제 공시일: {rcept_dt})"
+                )
+                return standard_metrics # 공시 전이므로 빈 껍데기(NaN) 반환
+
         # 3. 재무제표 종류(sj_div) 및 계정 매핑
+        # total_borrowings(합산 필요)과 interest_expense(다단계 폴백 필요)는 아래에서 별도 처리
         for standard_key, rules in self.ACCOUNT_MAPPING.items():
+            if standard_key in ('total_borrowings', 'interest_expense'):
+                continue
+
             # sj_div (BS: 재무상태표, IS: 손익계산서, CF: 현금흐름표) 필터링
-            sj_filtered = target_df[target_df['sj_div'].str.contains(rules["sj"], na=False)]
-            
-            for _, row in sj_filtered.iterrows():
-                acc_id = str(row.get('account_id', '')).strip()
-                acc_nm = str(row.get('account_nm', '')).strip()
+            sj_filtered = target_df[target_df['sj_div'].astype(str).str.contains(rules["sj"], na=False)]
+            standard_metrics[standard_key] = self._match_account(
+                sj_filtered, target_df,
+                ids=rules.get("ids"), names=rules.get("names"),
+                prefer_cumulative=(rules["sj"] in ['IS', 'CF'])
+            )
 
-                # ---------------------------------------------------
-                # [수정된 파싱 로직] isdigit() 대신 try-except float 캐스팅 사용
-                # ---------------------------------------------------
-                amount = float('nan')
-                
-                # 1. IS/CF 계정이면서 누적치 컬럼이 존재하는 경우 (누적치 우선)
-                # [개선] 컬럼 존재 여부 사전 확인 (KeyError 방지)
-                if rules["sj"] in ['IS', 'CF'] and 'thstrm_add_amount' in target_df.columns:
-                    if pd.notna(row['thstrm_add_amount']):
-                        add_amt_str = str(row['thstrm_add_amount']).replace(',', '').strip()
-                        try:
-                            amount = float(add_amt_str)
-                        except ValueError:
-                            pass
-                
-                # 2. BS 계정이거나, IS/CF지만 누적치 컬럼이 없는 경우 기본 컬럼 사용
-                if pd.isna(amount):
-                    amt_str = str(row.get('thstrm_amount', '')).replace(',', '').strip()
-                    try:
-                        amount = float(amt_str)
-                    except ValueError:
-                        pass
+        # ---------------------------------------------------------
+        # [특수 처리 1] 총차입금: 유동/비유동/사채 등 여러 행을 전부 합산
+        # ---------------------------------------------------------
+        borrow_rules = self.ACCOUNT_MAPPING['total_borrowings']
+        bs_filtered = target_df[target_df['sj_div'].astype(str).str.contains(borrow_rules["sj"], na=False)]
+        standard_metrics['total_borrowings'] = self._sum_matching_accounts(
+            bs_filtered, target_df, ids=borrow_rules.get("ids"), names=borrow_rules.get("names")
+        )
 
-                if pd.isna(amount):
-                    continue
-                # ---------------------------------------------------
-            
-                if acc_id in rules["ids"] or any(name in acc_nm for name in rules["names"]):
-                    standard_metrics[standard_key] = amount
-                    break
+        # ---------------------------------------------------------
+        # [특수 처리 2] 이자비용: ①정확계정 → ②P&L "이자비용" → ③CF 이자지급 조정 라인
+        # → ④광의 금융비용(최후 수단) 순으로 시도
+        # ---------------------------------------------------------
+        int_rules = self.ACCOUNT_MAPPING['interest_expense']
+        is_filtered = target_df[target_df['sj_div'].astype(str).str.contains(int_rules["sj"], na=False)]
+
+        standard_metrics['interest_expense'] = self._match_account(
+            is_filtered, target_df, ids=int_rules.get("ids"), names=int_rules.get("names"),
+            prefer_cumulative=True
+        )
+
+        if pd.isna(standard_metrics['interest_expense']):
+            cf_filtered = target_df[target_df['sj_div'].astype(str) == 'CF']
+            standard_metrics['interest_expense'] = self._match_account(
+                cf_filtered, target_df, ids=int_rules.get("cf_ids"), prefer_cumulative=True
+            )
+
+        if pd.isna(standard_metrics['interest_expense']):
+            standard_metrics['interest_expense'] = self._match_account(
+                is_filtered, target_df, names=int_rules.get("fallback_names"), prefer_cumulative=True
+            )
 
         return standard_metrics
 
@@ -448,7 +599,8 @@ class QuantDataLoader:
         """
         base_date 기준으로 공시가 완료된 최근 4개 분기의 재무 데이터를 조회하여 TTM을 계산합니다.
         - IS/CF 계정 (Flow): 4개 분기 합산
-        - BS 계정 (Stock): 가장 최근 분기말 잔액 스냅샷
+        - BS 계정 (Stock): self.ttm_denominator 설정에 따라 최근 분기말 스냅샷("latest_snapshot",
+          기본값) 또는 4개 분기 평균("avg_4q")
         """
         ttm_metrics = {key: float('nan') for key in self.ACCOUNT_MAPPING.keys()}
         
@@ -484,8 +636,16 @@ class QuantDataLoader:
         
         for key, rules in self.ACCOUNT_MAPPING.items():
             if rules["sj"] == "BS":
-                # 재무상태표(Stock)는 가장 최근 분기말 잔액 스냅샷 사용
-                ttm_metrics[key] = latest_q.get(key, float('nan'))
+                if self.ttm_denominator == "avg_4q":
+                    # 4개 분기 평균: 하나라도 결측치면 왜곡 방지를 위해 NaN 유지(Flow 항목과 동일 원칙)
+                    val_list = [q.get(key, float('nan')) for q in valid_quarters]
+                    if any(pd.isna(v) for v in val_list):
+                        ttm_metrics[key] = float('nan')
+                    else:
+                        ttm_metrics[key] = sum(val_list) / len(val_list)
+                else:
+                    # "latest_snapshot"(기본값): 가장 최근 분기말 잔액 스냅샷 사용
+                    ttm_metrics[key] = latest_q.get(key, float('nan'))
             else:
                 # 손익계산서/현금흐름표(Flow)는 4개 분기 합산
                 # 하나라도 결측치가 있으면 합산값의 왜곡을 막기 위해 NaN 유지

@@ -26,7 +26,9 @@ class FundamentalImproveScreener:
         self.gpm_weight = params.get('gpm_weight', 0.2)
         self.pass_percentile = params.get('composite_pass_percentile', 0.3)
         self.sales_decline_threshold = params.get('cost_cutting_only_sales_decline_threshold', 0.00)
-        
+        self.zscore_clip_lower = params.get('zscore_clip_lower', 0.01)
+        self.zscore_clip_upper = params.get('zscore_clip_upper', 0.99)
+
         self.logger = logging.getLogger(__name__)
 
     def run(self, sector_tickers_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
@@ -106,9 +108,9 @@ class FundamentalImproveScreener:
         # ---------------------------------------------------------
         # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------
-        df['sales_z'] = calc_zscore(df[TurnaroundCols.sales_growth_yoy])
-        df['sga_inv_z'] = calc_zscore(-df[TurnaroundCols.sga_yoy_avg]) # 판관비 증가는 나쁘므로 부호 반전
-        df['gpm_z'] = calc_zscore(df[TurnaroundCols.gpm_yoy])
+        df['sales_z'] = calc_zscore(df[TurnaroundCols.sales_growth_yoy], self.zscore_clip_lower, self.zscore_clip_upper)
+        df['sga_inv_z'] = calc_zscore(-df[TurnaroundCols.sga_yoy_avg], self.zscore_clip_lower, self.zscore_clip_upper) # 판관비 증가는 나쁘므로 부호 반전
+        df['gpm_z'] = calc_zscore(df[TurnaroundCols.gpm_yoy], self.zscore_clip_lower, self.zscore_clip_upper)
         
         weights = {'sales_z': self.sales_weight, 'sga_inv_z': self.sga_weight, 'gpm_z': self.gpm_weight}
         df[TurnaroundCols.stage3_score] = compute_composite_score(df, weights)

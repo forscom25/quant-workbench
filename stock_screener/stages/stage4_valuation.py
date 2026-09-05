@@ -22,7 +22,9 @@ class ValuationScreener:
         self.bps_weight = params.get('bps_growth_weight', 0.5)
         self.pass_percentile = params.get('composite_pass_percentile', 0.3)
         self.trap_roe_threshold = params.get('value_trap_roe_threshold', 0.05)
-        
+        self.zscore_clip_lower = params.get('zscore_clip_lower', 0.01)
+        self.zscore_clip_upper = params.get('zscore_clip_upper', 0.99)
+
         self.logger = logging.getLogger(__name__)
 
     def run(self, input_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
@@ -62,8 +64,8 @@ class ValuationScreener:
         # ---------------------------------------------------------
         # PBR 역수 처리 (자본잠식 등 0 이하 값은 np.nan 처리하여 구제)
         safe_pbr = df[ValuationCols.pbr].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
-        df['pbr_inv_z'] = calc_zscore(1 / safe_pbr)
-        df['bps_z'] = calc_zscore(df[ValuationCols.bps_growth])
+        df['pbr_inv_z'] = calc_zscore(1 / safe_pbr, self.zscore_clip_lower, self.zscore_clip_upper)
+        df['bps_z'] = calc_zscore(df[ValuationCols.bps_growth], self.zscore_clip_lower, self.zscore_clip_upper)
         
         weights = {'pbr_inv_z': self.pbr_weight, 'bps_z': self.bps_weight}
         df[ValuationCols.stage4_score] = compute_composite_score(df, weights)

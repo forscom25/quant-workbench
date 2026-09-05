@@ -36,6 +36,8 @@
 
 **스키마 매핑**: `SectorMetrics` (`return_z_score`, `volume_z_score`, `composite_score`, `is_value_trap_warning`, `fail_reason`) — 컷오프 미달 섹터도 row는 보존되고 `fail_reason`에 `COMPOSITE_SCORE_BELOW_CUTOFF`가 채워진다. 소속 티커에는 `pipeline.py`가 이 판정을 `SECTOR_NOT_QUALIFIED` 사유로 상속시켜 티커 단위 `fail_reason`을 만든다 (자세한 흐름은 [`architecture.md`](./architecture.md) §2.1 참고).
 
+**알려진 한계 (섹터 라벨의 point-in-time 여부)**: `loader.get_kospi_universe()`가 종목별 `sector`를 채울 때 쓰는 `fdr.StockListing('KRX-DESC')`는 날짜 인자를 받지 않아 `base_date`와 무관하게 항상 "캐시 생성 시점"의 현재 업종 분류를 반환한다. 실제로 `universe_20190930.csv`와 `universe_20250930.csv`를 비교한 결과 공통 종목 747개 전부 섹터가 동일 — 즉 6년치 캐시 전부가 하나의 "오늘 기준" 업종 스냅샷을 공유하고 있음을 확인함(2026-09-06). 시가총액/종가/티커 목록은 `base_date` 기준 point-in-time이 맞지만 섹터만 예외. KRX 업종 재분류 자체가 드물게 일어나는 편이라 실무 영향은 제한적일 것으로 판단해, 과거 시점 업종 분류를 제공하는 별도 데이터 소스를 찾기 전까지는 한계로 남겨두고 넘어가기로 결정함.
+
 ---
 
 ## 2단계: 섹터 내 우량주 탐색
@@ -172,6 +174,9 @@
 - [ ] `na_reasons` 필드 타입을 stage 전체에서 통일 (현재 Stage3은 dict, Stage2/5는 comma-joined string)
 - [ ] 섹터-종목 기준일 역전(look-ahead bias) 방지용 명시적 체크 재도입 여부 결정 — 과거 `inject_sector_info`가 담당했으나 삭제된 뒤 대체 로직 없음
 - [ ] `main.py`(실전 스크리닝 진입점) 착수 여부 및 시점 결정 — 현재 미착수, 백테스트는 `backtest/run_backtest.py`로 별도 진행 중
+- [ ] 섹터 라벨을 point-in-time으로 만들 과거 시점 업종 분류 데이터 소스 조사 (현재 `fdr.StockListing('KRX-DESC')`는 날짜 미지원 — 1단계 "알려진 한계" 참고, 당장은 한계로 수용)
+- [ ] `global.profitability_basis`의 `"annual"`(연간 확정치 기준) 경로 구현 — `loader.get_annual_financials()`는 이미 있으나 파이프라인에 배선되지 않음. 현재는 `"ttm"`만 동작
+- [ ] `global.ttm_denominator` 기본값을 `latest_snapshot` → `avg_4q`로 바꿀지 백테스트로 비교 검증 (avg_4q는 4개 분기 BS 값이 모두 있어야 해서 결측 종목이 늘어날 수 있는 trade-off 존재)
 
 ---
 
@@ -186,4 +191,5 @@
 | 2026-08-03 | Stage 3, 4의 필터링 로직을 이진 조건(Hard Cut)에서 **Z-score 가중 합산(Composite Score)** 및 상대 퍼센타일 평가로 전면 개편.  매출 역성장, 밸류트랩 등은 탈락 사유가 아닌 경고 태그(Tag)로 전환 |
 | 2026-08-04 | Stage 5 재무 건전성 평가를 절대 컷오프에서 Z-score 가중 합산(Composite Score) 방식으로 개편. 턴어라운드 성장주 구제를 위해 ICR에 0.7 가중치 부여 및 경고 태그(Warning Tag) 도입. 생존자 편향 오류 수정을 위해 섹터 상대평가에서 Pool 상대평가로 전환 |
 | 2026-08-07 | 공통 설계 원칙 고도화: CQS(명령-조회 분리) 아키텍처 원칙 추가, KOSPI 시세 기반 실제 영업일 추출 및 공시 시차 원천 차단 로직 반영, 자본 증식 가속화를 위한 성장주 프리미엄 원칙 추가 |
-| 2026-09-01 | 문서-구현 정합화: "탈락 종목 보존"(fail_reason 컬럼) 패턴을 Stage 1/2/5까지 전체 확장, 그에 맞춰 각 단계 스키마 매핑 갱신(`fail_reason` 필드 반영). Stage4에 `per` 필드 추가(실제 값 채움, 스코어링 미반영), `psr`은 스키마에서 제거하고 TODO로 이관. 한 번도 실제로 쓰인 적 없던 `StockProfile`/`inject_sector_info` 기반 look-ahead bias 방지 서술을 삭제하고 "현재 미구현" 상태로 정정. `na_reasons` 타입이 stage마다 다르다는 점을 명시(통일은 TODO). `fail_reason` Enum 고도화 및 `visualize.py` 라이브러리 선정 TODO는 이미 완료되어 제거
+| 2026-09-01 | 문서-구현 정합화: "탈락 종목 보존"(fail_reason 컬럼) 패턴을 Stage 1/2/5까지 전체 확장, 그에 맞춰 각 단계 스키마 매핑 갱신(`fail_reason` 필드 반영). Stage4에 `per` 필드 추가(실제 값 채움, 스코어링 미반영), `psr`은 스키마에서 제거하고 TODO로 이관. 한 번도 실제로 쓰인 적 없던 `StockProfile`/`inject_sector_info` 기반 look-ahead bias 방지 서술을 삭제하고 "현재 미구현" 상태로 정정. `na_reasons` 타입이 stage마다 다르다는 점을 명시(통일은 TODO). `fail_reason` Enum 고도화 및 `visualize.py` 라이브러리 선정 TODO는 이미 완료되어 제거 |
+| 2026-09-06 | `data/cache` 실데이터 검증 기반 개선: (1) `interest_expense` 계정 매핑을 정확ID→P&L 세부항목→CF 이자지급 라인→광의 금융비용 4단계 우선순위로 재구성(캐시 300개 표본 검증 결과 기존 방식은 70%가 20%p 이상 왜곡). (2) ROIC 분모를 자기자본(사실상 ROE와 동일했던 오류)에서 `total_borrowings + total_equity`(진짜 투하자본)로 수정, `total_borrowings` 필드 신규 추가. (3) 공시 시차 검증의 fail-open 분기 2곳을 fail-closed로 전환(캐시 21,768개 전수조사 결과 지금까지 발동 이력은 없었으나 유일한 look-ahead 방지 장치라 안전하게 닫음). (4) 섹터 지표 집계를 단순평균에서 시가총액가중 평균으로 전환. (5) 섹터 라벨이 point-in-time이 아니라는 한계를 코드 docstring과 1단계 절에 명시(과거 시점 업종 분류 데이터 소스 부재로 당장은 한계로 수용, TODO로 추적). (6) `BacktestEngine`에 `min_portfolio_size`(기본 5) 도입 — 통과 종목이 이 수 미만이면 집중 리스크 회피를 위해 그 분기는 거래를 스킵하고 현금(0%) 처리(지수 부진 시 현금 비중을 높이는 것과 같은 논리). 통과 종목은 충분했으나 전량 시세 데이터가 없어 `performance_log`에서 조용히 누락되던 분기도 같은 방식(현금 처리)으로 통일해 시계열에 구멍이 안 생기도록 수정. (7) 백테스트 엔진의 생존편향 수정: `_get_period_return`이 NaN을 반환한 종목을 조용히 평균에서 빼던 것을, `_is_delisted`로 해당 시점 KOSPI 유니버스 존재 여부를 확인해 실제 상장폐지면 전손(-100%)으로 반영하고, 유니버스엔 남아있는데 시세만 없는 경우(데이터 품질 이슈)만 제외하도록 구분. (8) `params.yaml`의 장식용 `global` 설정 정리: `disclosure_lag_check`는 look-ahead 방지의 유일한 안전장치라 끌 수 없게 아예 삭제, `ttm_denominator`의 `avg_4q`(4개 분기 평균 분모)를 실제로 구현하고 `run_backtest.py`/`cache_warmup.py`에서 loader까지 배선(증자·자사주 매입 등으로 분모가 급변할 때의 외란 완화용). `profitability_basis`의 `"annual"` 분기는 여전히 미구현 상태임을 주석에 명시하고 TODO로 이관. (9) `params.yaml` 전수점검: Stage2 `effective_tax_rate`(0.22, "임시 법인세율"이라 자체 주석에 적혀있던 값), Stage3/4/5의 `calc_zscore` 극단값 클리핑 분위(`zscore_clip_lower/upper`, 기존 0.01/0.99 하드코딩), Stage5의 ICR 상한 캡·클리핑 범위·경고 태그 임계치(`icr_cap`, `icr_clip_lower`, `debt_ratio_clip_upper`, `icr_warning_threshold`, `debt_ratio_warning_percentile`, `min_sample_for_relative_eval`), `BacktestEngine`의 `fee_rate`/`slippage`/`min_portfolio_size`를 전부 params.yaml로 이관(기본값은 기존 하드코딩 값과 동일하게 유지해 회귀 없음). `core/metrics_utils.calc_zscore`는 클리핑 분위를 인자로 받도록 시그니처 변경. 반면 `stage3_fundamental_improve.py`의 `len(q_series) < 6`은 재검토 결과 파라미터화 대상이 아님으로 판단(재고 — `sga_lookback_quarters`와는 별개로 YoY 계산 로직이 index 0/1/4/5를 직접 참조하는 구조적 최소 요구치라, `sga_lookback_quarters`를 바꿔도 이 상수는 6으로 고정이어야 함) |

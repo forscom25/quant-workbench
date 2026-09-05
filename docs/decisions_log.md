@@ -138,3 +138,29 @@
   6. `analysis/visualize.py`가 존재하지 않는 `mdd`/`cumulative_return` 컬럼을 직접 읽으려던 것을, `analysis/stats.py`의 `calc_mdd`/`calc_cumulative_returns`를 호출하도록 연결 — CQS 원칙(연산은 stats.py, 렌더링은 visualize.py)을 실제로 지키게 됨.
   7. `main.py`(실전 스크리닝 진입점)는 현재 빈 파일 상태로 당장 착수하지 않기로 결정 — 아직 백테스트/파라미터 튜닝 단계이므로 우선순위 낮음.
 - → `core/schema.py`, `core/metrics_utils.py`, `core/pipeline.py`, `stages/*.py`, `data/loader.py`, `analysis/visualize.py` 반영 완료. `architecture.md`, `screening_criteria.md` 반영 완료.
+
+## 2026-09-06
+
+### [결정] `data/cache` 실데이터 기반 알고리즘 로직 재점검
+- **배경**: 본격적인 코드 수정에 앞서 현재 알고리즘의 예상 문제점을 점검. `data/cache`에 쌓인 DART 원자료를 실제로 까보면서 계정 매핑의 타당성을 검증하는 방식으로 진행하기로 함.
+- **발견**: `interest_expense` 계정 매핑이 "금융비용/금융원가"(FX·파생 손익 등이 섞인 광의 개념)를 정확한 계정보다 우선 매치하는 구조적 결함 발견 — 캐시 150개 표본 검증 결과 87개(70%)가 20%p 이상 괴리, 일부는 수백 배 차이. Stage2 ROIC의 분모(`total_assets - total_liabilities`)가 회계항등식상 자기자본과 동일해 사실상 ROIC가 아닌 ROE의 변형이었음도 확인.
+- **해결책**: `interest_expense`를 정확ID→P&L 세부항목→CF 이자지급 라인→광의 금융비용 4단계 우선순위로 재구성(300개 표본 재검증 결과 83%가 CF 라인, 9%만 광의 금융비용에 의존). ROIC 분모를 `total_borrowings + total_equity`(진짜 투하자본)로 수정, DART 차입금 계정이 회사마다 제각각(8종 이상 확인)이라 매칭 실패 시 무차입(0)으로 간주. PER은 pykrx 응답에 이미 있는데 버려지고 있던 값이라 즉시 살림, PSR은 별도 DART 매출 조회가 필요해 TODO로 이관.
+- **부수 발견**: 위 계정 매핑 리팩터(정확ID 우선 매칭) 덕분에, 미처 모르고 있던 또 다른 잠재 버그(`total_liabilities`/`total_equity`가 "자본과부채총계"라는 대차대조표 전체합계 문자열에 부분매치될 위험)도 함께 해소됨을 캐시 200개 재검증으로 확인.
+- → `data/loader.py`, `stages/stage2_sector_leaders.py` 반영 완료.
+
+### [결정] 남은 문제 우선순위 확정 및 순차 처리 (4→2→3→6→1→5)
+- **논의**: 지난 리뷰에서 나열했던 6개 미해결 항목(백테스트 생존편향, 섹터 시총가중, 섹터 라벨 point-in-time, 포지션 수 편차, 공시 시차 fail-open, params.yaml 장식용 설정) 중 어떤 걸 먼저 볼지 사용자가 우선순위 지정 — "look-ahead bias를 줄이는 게 핵심"이라는 기준으로 4번(공시 시차)부터 시작.
+- **4번 (공시 시차 fail-open)**: `parse_standardized_financials`의 disclosure-lag 체크가 `rcept_no` 컬럼 누락/파싱 실패 시 조용히 검증을 건너뛰고 데이터를 쓰던 것을 fail-closed로 전환. 캐시 21,768개 전수조사 결과 이 분기가 실제로 발동한 이력은 0건이었으나(현재 데이터엔 영향 없음), 유일한 look-ahead 방지 장치라 안전하게 닫기로 결정.
+- **2번 (섹터 시총가중)**: `get_sector_metrics`의 섹터 수익률 집계를 종목 단순평균에서 시가총액가중으로 교체(문서 설계와 실제 코드가 어긋나 있던 부분). `groupby.apply` 대신 `market_cap`을 결측 마스킹한 벡터화 연산으로 구현해 향후 pandas FutureWarning도 회피.
+- **3번 (섹터 라벨 point-in-time)**: `fdr.StockListing('KRX-DESC')`가 날짜 인자를 지원하지 않아 항상 "캐시 생성 시점" 기준 업종이 모든 과거 데이터에 붙는 문제. `universe_20190930.csv` vs `universe_20250930.csv`(공통 종목 747개) 비교 결과 섹터 라벨 차이 0건 확인 — 업종 재분류 자체가 드물어 실무 영향이 제한적이라 판단, **수정하지 않고 코드 docstring과 문서에 한계로 명시만 하기로 결정**(과거 시점 업종 분류 데이터 소스가 마땅치 않음).
+- **6번 (포지션 수 편차)**: "지수 부진 시 현금 비중을 높이는 것과 같은 논리"로, 통과 종목이 `min_portfolio_size`(기본 5) 미만이면 거래를 스킵하고 현금(0%) 처리하기로 결정. 작업 중 인접 버그(임계치는 충족했으나 전 종목 시세 데이터가 없어 `performance_log`에서 조용히 통째로 누락되던 분기)도 함께 발견해 동일한 현금 처리 방식으로 통일.
+- **1번 (생존편향)**: `_get_period_return`이 NaN을 반환한 종목을 조용히 평균에서 제외하던 것을, `_is_delisted`로 해당 시점 KOSPI 유니버스 존재 여부를 확인해 실제 상장폐지면 전손(-100%) 반영, 유니버스엔 남아있는데 시세만 없으면(데이터 품질 이슈) 기존대로 제외하도록 구분.
+- **5번 (params.yaml 장식용 설정)**: `global.disclosure_lag_check`는 4번에서 막 강화한 안전장치를 끌 수 있게 하는 게 앞뒤가 안 맞아 아예 삭제. `ttm_denominator`의 `avg_4q`(4분기 평균 분모)는 "외란 대응 장치로 좋다"는 사용자 판단에 따라 실제 구현(증자·자사주매입 등으로 분모 급변 시 완화 효과, ROE 예시로 10%→14.3% 차이 확인). `profitability_basis`의 `"annual"` 경로는 `get_annual_financials()`가 이미 있으나 미배선 상태로 TODO 이관.
+- → `data/loader.py`, `backtest/forward_return.py`, `backtest/run_backtest.py`, `backtest/cache_warmup.py`, `config/params.yaml` 반영 완료. `screening_criteria.md` 반영 완료.
+
+### [진행 중] params.yaml 하드코딩 전수점검 (그룹 B 완료, 그룹 A 대기)
+- **논의**: 사용자가 params.yaml에 정리할 게 더 있다고 지적(백테스트 시작/종료 날짜 등 예시). 전수 점검 결과 두 그룹으로 분류:
+  - **그룹 A (미착수)**: 백테스트 시작/종료 연도가 `run_backtest.py`(argparse 기본값), `cache_warmup.py`의 `get_quarterly_rebalance_dates(2019, 2025)`, `years = list(range(2018, 2026))` 세 곳에 각각 독립적으로 하드코딩되어 있어, 기간을 바꾸려면 3곳을 다 고쳐야 하고 하나라도 빠뜨리면 캐시 예열 범위와 백테스트 범위가 어긋나는 위험 존재. **다음 세션에서 처리 예정.**
+  - **그룹 B (완료)**: Stage2 `effective_tax_rate`(0.22), Stage3/4/5의 `calc_zscore` 극단값 클리핑 분위(0.01/0.99), Stage5의 ICR 캡·클리핑·경고 태그 임계치 6종, `BacktestEngine`의 `fee_rate`/`slippage`/`min_portfolio_size`를 전부 params.yaml로 이관. 기본값은 기존 하드코딩 값과 동일하게 유지(회귀 없음)하고, 커스텀 값 주입 시 실제로 반영됨을 확인(장식용 config 재발 방지).
+  - **재검토 후 제외**: `stage3_fundamental_improve.py`의 `len(q_series) < 6`은 처음엔 `sga_lookback_quarters`와 연동 안 된 버그로 의심했으나, 재검토 결과 YoY 계산이 `q_series[0,1,4,5]`를 직접 참조하는 구조적 최소 요구치라 파라미터화 대상이 아님으로 최종 판단.
+- → 그룹 B는 `config/params.yaml`, `core/metrics_utils.py`, `stages/stage2~5*.py`, `backtest/run_backtest.py` 반영 완료. 그룹 A는 다음 세션 진행.

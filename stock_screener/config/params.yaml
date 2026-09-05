@@ -1,8 +1,8 @@
-# 글로벌 설정 (데이터 로드 기준)
+# 글로벌 설정 (수익성 지표 계산 시 사용할 회계 기준 — 데이터를 얼마나 자주 불러오냐와는 무관)
 global:
-  profitability_basis: "ttm"             # "ttm" | "annual"
-  ttm_denominator: "latest_snapshot"     # "latest_snapshot" | "avg_4q"
-  disclosure_lag_check: true             # 공시 시차 검증 여부
+  profitability_basis: "ttm"             # "ttm"만 구현됨. "annual"(연간 확정치 기준)은 TODO — 아직 미구현
+  ttm_denominator: "latest_snapshot"     # "latest_snapshot" | "avg_4q" (둘 다 구현됨, loader.get_ttm_financials 참고)
+  # disclosure_lag_check는 삭제됨 — look-ahead bias 방지의 유일한 안전장치라 끌 수 없게(항상 켜짐) 확정
 
 # 1단계: 소외 섹터 발굴
 stage1_neglected_sector:
@@ -17,6 +17,7 @@ stage2_sector_leaders:
   op_margin_std_percentile_cutoff: 0.5   # 섹터 내 영업이익률 변동성 하위 50% (낮을수록 좋음)
   op_margin_lookback_q: 8                # 영업이익률 변동성 계산을 위한 과거 분기 수 (예: 8분기 = 2년)
   op_margin_min_quarters: 4              # 영업이익률 변동성 계산을 위한 최소 분기 수 (예: 4분기 = 1년)
+  effective_tax_rate: 0.22               # ROIC 세후영업이익(NOPAT) 계산용 법인세율 가정치
 
 # 3단계: 재무 개선주 탐색 (Composite Score 방식)
 stage3_fundamental_improve:
@@ -26,6 +27,8 @@ stage3_fundamental_improve:
   gpm_weight: 0.3                                    # GPM 증감률 Z-score 가중치
   composite_pass_percentile: 0.3                     # 합산 점수 상위 30% 통과
   cost_cutting_only_sales_decline_threshold: -0.05   # 매출 역성장 경고 태그 임계치 (-5% 이하 시 태그)
+  zscore_clip_lower: 0.01                            # Z-score 산출 전 극단값 클리핑 하한 분위
+  zscore_clip_upper: 0.99                            # Z-score 산출 전 극단값 클리핑 상한 분위
 
 # 4단계: 밸류에이션 기반 저평가 탐색 (Composite Score 방식)
 stage4_valuation:
@@ -33,9 +36,25 @@ stage4_valuation:
   bps_growth_weight: 0.8             # BPS 성장률 Z-score 가중치
   composite_pass_percentile: 0.3     # 합산 점수 상위 30% 통과
   value_trap_roe_threshold: 0.05     # 밸류트랩 경고 태그용 ROE 임계치 (5% 미만 시 태그)
+  zscore_clip_lower: 0.01            # Z-score 산출 전 극단값 클리핑 하한 분위
+  zscore_clip_upper: 0.99            # Z-score 산출 전 극단값 클리핑 상한 분위
 
 # 5단계: 재무 건전성 기반 최종 필터링 (Composite Score 방식)
 stage5_financial_health:
-  icr_weight: 0.7                    # 이자보상배율 Z-score 가중치 (상환 능력 최우선)
-  debt_weight: 0.3                   # 부채비율(역수) Z-score 가중치
-  stage5_cutoff_quantile: 0.2        # 합산 점수 하위 20% 컷오프 (상위 80% 통과)
+  icr_weight: 0.7                       # 이자보상배율 Z-score 가중치 (상환 능력 최우선)
+  debt_weight: 0.3                      # 부채비율(역수) Z-score 가중치
+  stage5_cutoff_quantile: 0.2           # 합산 점수 하위 20% 컷오프 (상위 80% 통과)
+  zscore_clip_lower: 0.01               # Z-score 산출 전 극단값 클리핑 하한 분위
+  zscore_clip_upper: 0.99               # Z-score 산출 전 극단값 클리핑 상한 분위
+  icr_cap: 50.0                         # 무차입/이자비용 0 이하인 초우량 기업의 ICR 대체값(상한)
+  icr_clip_lower: -10.0                 # Z-score 산출 전 ICR 클리핑 하한
+  debt_ratio_clip_upper: 5.0            # Z-score 산출 전 부채비율(500%) 클리핑 상한
+  icr_warning_threshold: 1.0            # 이 미만이면 [ICR미달] 경고 태그
+  debt_ratio_warning_percentile: 0.90   # 섹터 내 부채비율 이 분위 초과 시 [과다부채] 경고 태그
+  min_sample_for_relative_eval: 5       # 이 수 이하면 상대평가(퍼센타일 컷오프) 자체를 생략하고 전원 통과
+
+# 백테스트 엔진 (거래 비용 가정 및 포트폴리오 구성 규칙)
+backtest:
+  fee_rate: 0.00015          # 편도 거래 수수료율
+  slippage: 0.002            # 편도 슬리피지 가정치
+  min_portfolio_size: 5      # 통과 종목이 이 수 미만이면 집중 리스크 회피를 위해 해당 분기 거래를 스킵(현금 처리)

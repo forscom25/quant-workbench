@@ -24,9 +24,10 @@ def compute_std(series: List[float], min_valid_points: int = 4) -> Tuple[float, 
     
     return std_val, MetricStatus.COMPUTED
 
-def calc_zscore(series: pd.Series) -> pd.Series:
-    """극단값(1%) 클리핑 후 Z-score 반환"""
-    clipped = series.clip(lower=series.quantile(0.01), upper=series.quantile(0.99))
+def calc_zscore(series: pd.Series, clip_lower: float = 0.01, clip_upper: float = 0.99) -> pd.Series:
+    """극단값(clip_lower~clip_upper 분위) 클리핑 후 Z-score 반환. 클리핑 분위는 호출부(stage)의
+    params.yaml `zscore_clip_lower`/`zscore_clip_upper`로 조정 가능 (기본값은 기존 동작과 동일)."""
+    clipped = series.clip(lower=series.quantile(clip_lower), upper=series.quantile(clip_upper))
     if clipped.std() == 0:
         return pd.Series(0, index=series.index)
     return (clipped - clipped.mean()) / clipped.std()

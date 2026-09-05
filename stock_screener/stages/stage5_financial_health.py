@@ -17,7 +17,15 @@ class FinancialHealthScreener:
         self.cutoff_quantile = params.get('stage5_cutoff_quantile', 0.2)
         self.icr_weight = params.get('icr_weight', 0.7)
         self.debt_weight = params.get('debt_weight', 0.3)
-        
+        self.zscore_clip_lower = params.get('zscore_clip_lower', 0.01)
+        self.zscore_clip_upper = params.get('zscore_clip_upper', 0.99)
+        self.icr_cap = params.get('icr_cap', 50.0)
+        self.icr_clip_lower = params.get('icr_clip_lower', -10.0)
+        self.debt_ratio_clip_upper = params.get('debt_ratio_clip_upper', 5.0)
+        self.icr_warning_threshold = params.get('icr_warning_threshold', 1.0)
+        self.debt_ratio_warning_percentile = params.get('debt_ratio_warning_percentile', 0.90)
+        self.min_sample_for_relative_eval = params.get('min_sample_for_relative_eval', 5)
+
         self.logger = logging.getLogger(__name__)
 
     def run(self, input_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
@@ -47,7 +55,7 @@ class FinancialHealthScreener:
 
             if pd.notna(op_inc) and pd.notna(int_exp):
                 if int_exp <= 0:
-                    icr = 50.0  # Z-score 계산을 위해 상단 캡핑
+                    icr = self.icr_cap  # Z-score 계산을 위해 상단 캡핑
                 else:
                     icr = np.divide(op_inc, int_exp)
 
@@ -70,23 +78,23 @@ class FinancialHealthScreener:
         # ---------------------------------------------------------
         # 2. Warning Tag 부착 (이상치 처리 및 로직 기반 태깅)
         # ---------------------------------------------------------
-        df['icr_capped'] = df['interest_coverage_ratio'].clip(lower=-10, upper=50)
-        df['debt_ratio_capped'] = df['debt_ratio'].clip(upper=5)
+        df['icr_capped'] = df['interest_coverage_ratio'].clip(lower=self.icr_clip_lower, upper=self.icr_cap)
+        df['debt_ratio_capped'] = df['debt_ratio'].clip(upper=self.debt_ratio_clip_upper)
 
-        df.loc[df['interest_coverage_ratio'] < 1.0, 'warning_tags'] += "[ICR미달]"
+        df.loc[df['interest_coverage_ratio'] < self.icr_warning_threshold, 'warning_tags'] += "[ICR미달]"
         df.loc[(df['ocf'] < df['net_income'].fillna(-np.inf)), 'warning_tags'] += "[이익질주의]"
-        
+
         df['debt_rank_pct'] = df.groupby('sector')['debt_ratio'].rank(pct=True, ascending=True)
         cond_not_finance = ~df['na_reasons'].astype(str).str.contains(FINANCE_SECTOR_CAUTION, na=False)
-        df.loc[cond_not_finance & (df['debt_rank_pct'] > 0.90), 'warning_tags'] += "[과다부채]"
+        df.loc[cond_not_finance & (df['debt_rank_pct'] > self.debt_ratio_warning_percentile), 'warning_tags'] += "[과다부채]"
 
         # ---------------------------------------------------------
         # 3. metrics_utils를 활용한 Z-score 및 합산 점수 계산
         # ---------------------------------------------------------
         df['debt_ratio_inv'] = -df['debt_ratio_capped']
 
-        df['icr_zscore'] = metrics_utils.calc_zscore(df['icr_capped'])
-        df['debt_zscore'] = metrics_utils.calc_zscore(df['debt_ratio_inv'])
+        df['icr_zscore'] = metrics_utils.calc_zscore(df['icr_capped'], self.zscore_clip_lower, self.zscore_clip_upper)
+        df['debt_zscore'] = metrics_utils.calc_zscore(df['debt_ratio_inv'], self.zscore_clip_lower, self.zscore_clip_upper)
 
         # YAML 설정 가중치 적용
         score_mapping = {'icr_zscore': self.icr_weight, 'debt_zscore': self.debt_weight}
@@ -102,11 +110,11 @@ class FinancialHealthScreener:
 
         df[HealthCols.fail_reason] = None
 
-        if len(df) > 5:
+        if len(df) > self.min_sample_for_relative_eval:
             cutoff_val = df['stage5_score'].dropna().quantile(1.0 - top_percentile)
             is_below_cutoff = df['stage5_score'].notna() & (df['stage5_score'] < cutoff_val)
             df.loc[is_below_cutoff, HealthCols.fail_reason] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
-        # 표본이 5개 이하면 상대평가 자체가 무의미하므로 전원 통과(fail_reason=None 유지)
+        # 표본이 min_sample_for_relative_eval 이하면 상대평가 자체가 무의미하므로 전원 통과(fail_reason=None 유지)
 
         passed_count = df[HealthCols.fail_reason].isnull().sum()
         self.logger.info(f"[Stage 5] {len(df)}개 중 {passed_count}개 생존")

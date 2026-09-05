@@ -50,7 +50,8 @@ def warm_up_dart_cache():
         print(f"❌ 설정 파일을 찾을 수 없습니다: {config_path}")
         return
         
-    loader = QuantDataLoader(use_cache=True)
+    ttm_denominator = params.get('global', {}).get('ttm_denominator', 'latest_snapshot')
+    loader = QuantDataLoader(use_cache=True, ttm_denominator=ttm_denominator)
     pipeline = QuantPipeline(params, loader)
     
     # 2. 백테스트와 동일하게 KOSPI 영업일 기반으로 생성

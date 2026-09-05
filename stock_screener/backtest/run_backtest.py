@@ -37,15 +37,22 @@ def main():
         return
 
     # 3. 로더 초기화 및 [핵심] 영업일 캘린더 요청
-    loader = QuantDataLoader(use_cache=True)
+    ttm_denominator = params.get('global', {}).get('ttm_denominator', 'latest_snapshot')
+    loader = QuantDataLoader(use_cache=True, ttm_denominator=ttm_denominator)
     
     # 🔥 캘린더 판정 권한을 loader에 전적으로 위임!
     base_dates = loader.get_quarterly_rebalance_dates(args.start, args.end)
     print(f"📅 생성된 리밸런싱 기준일: 총 {len(base_dates)}개 분기")
 
     # 4. 파이프라인 및 엔진 인스턴스 초기화 (조립)
+    backtest_params = params.get('backtest', {})
     pipeline = QuantPipeline(params, loader)
-    engine = BacktestEngine(pipeline, loader)
+    engine = BacktestEngine(
+        pipeline, loader,
+        fee_rate=backtest_params.get('fee_rate', 0.00015),
+        slippage=backtest_params.get('slippage', 0.002),
+        min_portfolio_size=backtest_params.get('min_portfolio_size', 5)
+    )
 
     # 5. 순수 엔진 실행
     print("⏳ 엔진에 날짜 리스트를 주입하고 시뮬레이션을 시작합니다...\n")
