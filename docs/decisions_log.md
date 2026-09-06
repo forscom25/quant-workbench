@@ -30,7 +30,7 @@
 ### [결정] 밸류에이션(PBR/BPS) 데이터 소스
 - DART 계정 조합 대신 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값 사용
 - 반대로 ROE/ROIC/영업이익률은 정의 통제(TTM 분자·스냅샷 분모 규칙 유지)를 위해 DART 원본 계정으로 직접 계산 유지
-- → architecture.md, screening_criteria.md 반영 완료
+- → architecture.md, screening_criteria.md 반영 완료 **(2026-09-06 갱신: `global.ttm_denominator` 설정 추가로 분모가 "스냅샷 유지"만은 아니게 됨 — `latest_snapshot`이 기본값이고 `avg_4q`를 선택지로 구현. 최신 내용은 screening_criteria.md 참고.)**
 
 ### [결정] 탈락 종목 보존 정책
 - **확정**: 종목을 완전히 버리지 않고, `pipeline.py`에서 단계별 통과 데이터프레임을 `history` 딕셔너리에 담아 최종 결과와 함께 반환하는 방식 채택 (강제 폐기나 복잡한 상태 객체 대신 단순 딕셔너리 축적)
@@ -39,7 +39,7 @@
 
 ### [결정] DART 일일 호출량 관리
 - **확정**: `loader.py`에 `dart_daily_limit` 카운터 구현. 한도 도달 시 `RuntimeError`로 스크리닝 즉시 중단 (조용히 `NOT_COMPUTABLE`로 새는 대신 명시적으로 실패시켜 원인 파악 쉽게)
-- → loader.py 구현 완료. architecture.md 반영 완료
+- → loader.py 구현 완료. architecture.md 반영 완료 **(2026-09-06 갱신: 이 카운터가 프로세스 메모리에만 있어 재시작마다 0으로 리셋되는 바람에 실제 서버 한도를 초과시킨 장애가 발생 — `dart_call_state.json`에 날짜별로 영속화하도록 개선. 자세한 경위는 같은 날짜 항목 "실제 백테스트 3차 실행" 참고.)**
 
 ### [결정] 통계 계산 표본 수 부족 처리
 - `op_margin_std` 등 계산 시 신규 상장주처럼 데이터가 부족한 경우, `metrics_utils.py`가 `NOT_COMPUTABLE` 상태를 부여
@@ -80,7 +80,7 @@
   1. Stage 3와 4의 필터링 로직을 절대 컷오프에서 **Z-score 기반의 가중 합산 점수(Composite Score)** 산출 방식으로 전면 교체.
   2. 임계치 미달(매출 역성장, 밸류 트랩 등)로 인한 무조건적인 탈락을 폐지하고, `is_cost_cutting_warning`, `is_pbr_value_trap` 형태의 경고 태그(Tag)만 부여.
   3. 공통 산출 로직(`calc_zscore`, `compute_composite_score`, `apply_percentile_filter`)을 `core/metrics_utils.py`로 추상화하여 코드 재사용성 극대화.
-- → stage3, stage4, metrics_utils.py 개편 완료. architecture.md 및 params.yaml 반영 완료
+- → stage3, stage4, metrics_utils.py 개편 완료. architecture.md 및 params.yaml 반영 완료 **(2026-09-06 갱신: `apply_percentile_filter`는 이후 2026-09-01 `fail_reason` 컬럼 리팩터 때 stage3/4가 컷오프 계산을 각자 인라인으로 바꾸면서 더 이상 호출하지 않게 됨 — 지금은 import만 남은 죽은 코드. "재사용성 극대화" 의도와 달리 실제로는 재사용되고 있지 않음.)**
 
 ### [진행 중] 스크리닝 파라미터(Percentile) 완화 튜닝
 - 단일 종목(삼천리) 생존으로 엔진 검증은 마쳤으나, 분산 투자를 위한 포트폴리오(10~20개 종목) 구성을 위해 Stage 3, 4의 `composite_pass_percentile`을 30%에서 50% 수준으로 완화하여 백테스트 재구동 및 튜닝 진행 예정.
@@ -116,7 +116,7 @@
 ### [결정] 캐시 디렉토리 절대 경로 고정
 - **이슈**: 스크립트 실행 위치(터미널 루트)에 따라 캐시 폴더가 의도치 않은 곳에 생성되는 현상.
 - **해결책**: `loader.py` 내부에서 `Path(__file__).resolve().parent`를 사용하여 캐시 폴더 생성 위치를 `data/.cache`로 강제 고정함.
-- → `loader.py` 반영 완료.
+- → `loader.py` 반영 완료. **(2026-09-06 갱신: 실제 경로는 `data/.cache`가 아니라 `data/cache`(점 없음) — 이 항목이 처음부터 잘못 적혀 있었음. `.gitignore`에도 두 표기가 혼재해 실제 경로가 무시 대상에서 빠지는 버그가 있었고 같은 날 함께 수정함.)**
 
 ### [진행 중] 성장주 타겟팅 파라미터 리모델링 기획
 - **논의**: 조기 은퇴 목표를 위한 자본 증식 가속화를 위해, 무거운 배당주를 배제하고 성장주에 확실한 프리미엄을 부여하는 방향으로 가중치 재편을 기획함.
@@ -163,7 +163,7 @@
   - **그룹 A**: 백테스트 시작/종료 연도가 `run_backtest.py`(argparse 기본값), `cache_warmup.py`의 `get_quarterly_rebalance_dates(2019, 2025)`, `years = list(range(2018, 2026))` 세 곳에 각각 독립적으로 하드코딩되어 있어, 기간을 바꾸려면 3곳을 다 고쳐야 하고 하나라도 빠뜨리면 캐시 예열 범위와 백테스트 범위가 어긋나는 위험 존재.
   - **그룹 B**: Stage2 `effective_tax_rate`(0.22), Stage3/4/5의 `calc_zscore` 극단값 클리핑 분위(0.01/0.99), Stage5의 ICR 캡·클리핑·경고 태그 임계치 6종, `BacktestEngine`의 `fee_rate`/`slippage`/`min_portfolio_size`를 전부 params.yaml로 이관. 기본값은 기존 하드코딩 값과 동일하게 유지(회귀 없음)하고, 커스텀 값 주입 시 실제로 반영됨을 확인(장식용 config 재발 방지).
   - **재검토 후 제외**: `stage3_fundamental_improve.py`의 `len(q_series) < 6`은 처음엔 `sga_lookback_quarters`와 연동 안 된 버그로 의심했으나, 재검토 결과 YoY 계산이 `q_series[0,1,4,5]`를 직접 참조하는 구조적 최소 요구치라 파라미터화 대상이 아님으로 최종 판단.
-- **그룹 A 처리(다음 세션)**: `backtest.start_year`(2019)/`end_year`(2025)를 params.yaml에 신설해 단일 출처로 통합. `run_backtest.py`는 argparse `--start`/`--end` 기본값을 `None`으로 바꾸고, CLI 인자가 있으면 그걸 우선하되 없으면 params.yaml 값으로 폴백하도록 수정(기존 CLI 오버라이드 기능은 그대로 유지). `cache_warmup.py`의 `years` 범위(과거엔 `range(2018, 2026)`으로 독립 하드코딩)는 `range(start_year - 1, end_year + 1)`로 파생 계산하도록 변경 — `-1`은 시작 연도 첫 분기의 TTM 계산이 전년도 분기까지 참조하는 구조적 이유. 세 곳 모두 값이 일치하고 기존 하드코딩과 동일한 기본 동작을 내는지 합성 테스트로 검증 완료.
+- **그룹 A 처리**: `backtest.start_year`(2019)/`end_year`(2025)를 params.yaml에 신설해 단일 출처로 통합. `run_backtest.py`는 argparse `--start`/`--end` 기본값을 `None`으로 바꾸고, CLI 인자가 있으면 그걸 우선하되 없으면 params.yaml 값으로 폴백하도록 수정(기존 CLI 오버라이드 기능은 그대로 유지). `cache_warmup.py`의 `years` 범위(과거엔 `range(2018, 2026)`으로 독립 하드코딩)는 `range(start_year - 1, end_year + 1)`로 파생 계산하도록 변경 — `-1`은 시작 연도 첫 분기의 TTM 계산이 전년도 분기까지 참조하는 구조적 이유. 세 곳 모두 값이 일치하고 기존 하드코딩과 동일한 기본 동작을 내는지 합성 테스트로 검증 완료.
 - → `config/params.yaml`, `core/metrics_utils.py`, `stages/stage2~5*.py`, `backtest/run_backtest.py`, `backtest/cache_warmup.py` 반영 완료. `screening_criteria.md` 반영 완료.
 
 ### [결정] DART 캐시 유효기간 분리 (실제 백테스트 실행 전 발견)
