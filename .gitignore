@@ -21,8 +21,12 @@ __pycache__/
 
 # --- 신규 추가 (데이터 파이프라인 및 백테스트 산출물) ---
 # 캐시 데이터 (DART 재무제표 등)
-data/.cache/
-data/cache/
+# 🚨 [수정] 실제 캐시 경로는 stock_screener/data/cache/(리포 루트가 아님)라 내부에 "/"가
+# 있는 기존 패턴(data/cache/)은 .gitignore 위치(루트) 기준으로만 매칭되어 무시되지 않고
+# 있었음(dart_call_state.json, .empty 마커 등 24,000개+ 캐시 파일이 untracked로 노출됨
+# 확인) — **/ 접두사로 깊이에 상관없이 매칭되도록 수정.
+**/data/.cache/
+**/data/cache/
 
 # 백테스트 결과 및 차트 산출물 (Git 추적 제외)
 outputs/

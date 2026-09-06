@@ -41,8 +41,8 @@ class FundamentalImproveScreener:
             # 1. 시계열 원자료 조달
             q_series = loader.get_quarterly_financials_series(ticker, base_date, n_quarters=self.lookback_q)
             
-            na_reasons = []
-            
+            na_reasons = {}  # dict로 초기화 (아래에서 na_reasons['KEY'] = (...) 형태로 딕셔너리처럼 사용됨)
+
             # 🔴 버그 2 수정: q_series[0]만 반복 검사하던 논리 오류 해결
             if len(q_series) < 6 or all(pd.isna(q.get('revenue', np.nan)) for q in q_series[:6]):
                 na_reasons['DATA_TOO_SHORT'] = (MetricStatus.NOT_COMPUTABLE, "최근 6분기 재무 데이터 부족")

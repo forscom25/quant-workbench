@@ -94,13 +94,18 @@ class BacktestVisualizer:
 if __name__ == "__main__":
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     out_dir = PROJECT_ROOT / "outputs"
-    
-    # 더미 파일 경로 (실제 백테스트 후 생성된 파일 경로를 맵핑)
-    perf_csv = out_dir / "performance_log.csv"
-    port_csv = out_dir / "portfolio_log.csv"
-    
-    if perf_csv.exists() and port_csv.exists():
+
+    # run_backtest.py가 실행 시각(YYYYMMDD_HHMMSS)을 파일명에 포함시켜 저장하므로(과거엔 고정
+    # 파일명이라 재실행할 때마다 이전 결과가 조용히 덮어써졌음), 가장 최근 실행분을 자동으로 찾는다.
+    # 타임스탬프 포맷상 파일명 정렬 순서가 곧 시간 순서와 같다.
+    perf_candidates = sorted(out_dir.glob("performance_log_*.csv"))
+    port_candidates = sorted(out_dir.glob("portfolio_log_*.csv"))
+
+    if perf_candidates and port_candidates:
+        perf_csv = perf_candidates[-1]
+        port_csv = port_candidates[-1]
+        print(f"📄 가장 최근 백테스트 결과 사용: {perf_csv.name}")
         viz = BacktestVisualizer(perf_csv, port_csv, out_dir)
         viz.run_all()
     else:
-        print("⚠️ 아직 백테스트 결과 파일이 존재하지 않습니다.")
+        print("⚠️ 아직 백테스트 결과 파일이 존재하지 않습니다. run_backtest.py를 먼저 실행하세요.")

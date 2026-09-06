@@ -4,7 +4,7 @@ import yaml
 import pandas as pd
 import time
 from pykrx import stock
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 # 프로젝트 루트 경로 설정 (imports 에러 방지)
@@ -17,15 +17,11 @@ from core.pipeline import QuantPipeline
 from backtest.forward_return import BacktestEngine
 
 def main():
-    # 1. 실행 파라미터 (명령줄 인자) 설정
+    # 1. 실행 파라미터 (명령줄 인자) 설정 — 미지정 시 params.yaml의 backtest.start_year/end_year를 사용
     parser = argparse.ArgumentParser(description="Stock Screener Backtest Entry Point")
-    parser.add_argument("--start", type=int, default=2019, help="백테스트 시작 연도 (기본: 2019)")
-    parser.add_argument("--end", type=int, default=2025, help="백테스트 종료 연도 (기본: 2025)")
+    parser.add_argument("--start", type=int, default=None, help="백테스트 시작 연도 (기본: params.yaml backtest.start_year)")
+    parser.add_argument("--end", type=int, default=None, help="백테스트 종료 연도 (기본: params.yaml backtest.end_year)")
     args = parser.parse_args()
-
-    print("==================================================")
-    print(f"🚀 백테스트 파이프라인 가동: {args.start}년 ~ {args.end}년")
-    print("==================================================\n")
 
     # 2. 환경 설정 로드
     config_path = PROJECT_ROOT / "config" / "params.yaml"
@@ -36,16 +32,24 @@ def main():
         print(f"❌ 설정 파일을 찾을 수 없습니다: {config_path}")
         return
 
+    # CLI 인자가 있으면 우선, 없으면 params.yaml 값 사용 (cache_warmup.py와 동일한 단일 출처)
+    backtest_params = params.get('backtest', {})
+    start_year = args.start if args.start is not None else backtest_params.get('start_year', 2019)
+    end_year = args.end if args.end is not None else backtest_params.get('end_year', 2025)
+
+    print("==================================================")
+    print(f"🚀 백테스트 파이프라인 가동: {start_year}년 ~ {end_year}년")
+    print("==================================================\n")
+
     # 3. 로더 초기화 및 [핵심] 영업일 캘린더 요청
     ttm_denominator = params.get('global', {}).get('ttm_denominator', 'latest_snapshot')
     loader = QuantDataLoader(use_cache=True, ttm_denominator=ttm_denominator)
-    
+
     # 🔥 캘린더 판정 권한을 loader에 전적으로 위임!
-    base_dates = loader.get_quarterly_rebalance_dates(args.start, args.end)
+    base_dates = loader.get_quarterly_rebalance_dates(start_year, end_year)
     print(f"📅 생성된 리밸런싱 기준일: 총 {len(base_dates)}개 분기")
 
     # 4. 파이프라인 및 엔진 인스턴스 초기화 (조립)
-    backtest_params = params.get('backtest', {})
     pipeline = QuantPipeline(params, loader)
     engine = BacktestEngine(
         pipeline, loader,
@@ -59,12 +63,16 @@ def main():
     perf_df, port_df = engine.run(base_dates)
 
     # 6. 결과 산출물 저장
+    # 실행 시각(날짜+시각)을 파일명에 포함 — 오늘만 해도 크래시/재시도로 같은 날 여러 번 돌렸는데
+    # 고정 파일명이면 이전 결과가 조용히 덮어써져 실행 이력이 사라짐. 초 단위까지 넣어 같은 날
+    # 여러 번 돌려도 서로 덮어쓰지 않게 한다.
     out_dir = PROJECT_ROOT / "outputs"
     out_dir.mkdir(exist_ok=True)
-    
-    perf_path = out_dir / "performance_log.csv"
-    port_path = out_dir / "portfolio_log.csv"
-    
+
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    perf_path = out_dir / f"performance_log_{run_timestamp}.csv"
+    port_path = out_dir / f"portfolio_log_{run_timestamp}.csv"
+
     perf_df.to_csv(perf_path, index=False)
     port_df.to_csv(port_path, index=False)
 

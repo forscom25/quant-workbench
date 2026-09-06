@@ -75,9 +75,29 @@ class BacktestEngine:
             t_next_date = base_dates[i+1]
             
             self.logger.info(f"🔄 스크리닝 시점 [ {t_date} ]")
-            
-            final_df, _ = self.pipeline.run(t_date)
-            bm_return = self._get_period_return('KS11', t_date, t_next_date)
+
+            try:
+                final_df, _ = self.pipeline.run(t_date)
+                bm_return = self._get_period_return('KS11', t_date, t_next_date)
+            except RuntimeError:
+                # DART 일일 호출 한도 초과 등 "이번 프로세스 내내 회복 불가능한" 치명적 오류.
+                # dart_call_count는 프로세스 생애 동안 리셋되지 않으므로, 여기서 조용히 다음 분기로
+                # 넘어가봐야 남은 모든 분기가 똑같이 실패해 결과가 텅 비게 된다(실제로 이 버그로
+                # 22/27개 분기가 조용히 스킵된 사례 발생). 그러니 즉시 중단해 사용자가 알아채게 한다.
+                self.logger.error(f"[백테스트 중단] {t_date} 처리 중 치명적 오류 발생 — 남은 분기를 건너뛰지 않고 즉시 중단합니다.")
+                raise
+            except Exception as e:
+                # 그 외 예외(네트워크 순단 등 분기마다 독립적으로 재발할 수 있는 일시적 오류)만
+                # 이번 분기를 건너뛰고(현금 처리) 계속 진행한다.
+                self.logger.error(f"[분기 스킵] {t_date} 스크리닝 중 예외 발생, 이번 분기는 현금 처리 후 계속 진행합니다: {e}")
+                self.portfolio_log.append({
+                    'date': t_date, 'tickers': [], 'num_stocks': 0, 'skipped_low_count': True
+                })
+                self.performance_log.append({
+                    'date': t_next_date, 'portfolio_return': 0.0,
+                    'benchmark_return': float('nan'), 'excess_return': float('nan')
+                })
+                continue
 
             # 통과 종목이 아예 없거나 최소 분산 기준(min_portfolio_size) 미달이면 그 분기는
             # 거래를 스킵하고 현금(수익률 0%)으로 처리한다. 소수 종목 집중 베팅이 분기마다

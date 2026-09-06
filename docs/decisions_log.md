@@ -158,9 +158,55 @@
 - **5번 (params.yaml 장식용 설정)**: `global.disclosure_lag_check`는 4번에서 막 강화한 안전장치를 끌 수 있게 하는 게 앞뒤가 안 맞아 아예 삭제. `ttm_denominator`의 `avg_4q`(4분기 평균 분모)는 "외란 대응 장치로 좋다"는 사용자 판단에 따라 실제 구현(증자·자사주매입 등으로 분모 급변 시 완화 효과, ROE 예시로 10%→14.3% 차이 확인). `profitability_basis`의 `"annual"` 경로는 `get_annual_financials()`가 이미 있으나 미배선 상태로 TODO 이관.
 - → `data/loader.py`, `backtest/forward_return.py`, `backtest/run_backtest.py`, `backtest/cache_warmup.py`, `config/params.yaml` 반영 완료. `screening_criteria.md` 반영 완료.
 
-### [진행 중] params.yaml 하드코딩 전수점검 (그룹 B 완료, 그룹 A 대기)
+### [결정] params.yaml 하드코딩 전수점검 (그룹 A, B 모두 완료)
 - **논의**: 사용자가 params.yaml에 정리할 게 더 있다고 지적(백테스트 시작/종료 날짜 등 예시). 전수 점검 결과 두 그룹으로 분류:
-  - **그룹 A (미착수)**: 백테스트 시작/종료 연도가 `run_backtest.py`(argparse 기본값), `cache_warmup.py`의 `get_quarterly_rebalance_dates(2019, 2025)`, `years = list(range(2018, 2026))` 세 곳에 각각 독립적으로 하드코딩되어 있어, 기간을 바꾸려면 3곳을 다 고쳐야 하고 하나라도 빠뜨리면 캐시 예열 범위와 백테스트 범위가 어긋나는 위험 존재. **다음 세션에서 처리 예정.**
-  - **그룹 B (완료)**: Stage2 `effective_tax_rate`(0.22), Stage3/4/5의 `calc_zscore` 극단값 클리핑 분위(0.01/0.99), Stage5의 ICR 캡·클리핑·경고 태그 임계치 6종, `BacktestEngine`의 `fee_rate`/`slippage`/`min_portfolio_size`를 전부 params.yaml로 이관. 기본값은 기존 하드코딩 값과 동일하게 유지(회귀 없음)하고, 커스텀 값 주입 시 실제로 반영됨을 확인(장식용 config 재발 방지).
+  - **그룹 A**: 백테스트 시작/종료 연도가 `run_backtest.py`(argparse 기본값), `cache_warmup.py`의 `get_quarterly_rebalance_dates(2019, 2025)`, `years = list(range(2018, 2026))` 세 곳에 각각 독립적으로 하드코딩되어 있어, 기간을 바꾸려면 3곳을 다 고쳐야 하고 하나라도 빠뜨리면 캐시 예열 범위와 백테스트 범위가 어긋나는 위험 존재.
+  - **그룹 B**: Stage2 `effective_tax_rate`(0.22), Stage3/4/5의 `calc_zscore` 극단값 클리핑 분위(0.01/0.99), Stage5의 ICR 캡·클리핑·경고 태그 임계치 6종, `BacktestEngine`의 `fee_rate`/`slippage`/`min_portfolio_size`를 전부 params.yaml로 이관. 기본값은 기존 하드코딩 값과 동일하게 유지(회귀 없음)하고, 커스텀 값 주입 시 실제로 반영됨을 확인(장식용 config 재발 방지).
   - **재검토 후 제외**: `stage3_fundamental_improve.py`의 `len(q_series) < 6`은 처음엔 `sga_lookback_quarters`와 연동 안 된 버그로 의심했으나, 재검토 결과 YoY 계산이 `q_series[0,1,4,5]`를 직접 참조하는 구조적 최소 요구치라 파라미터화 대상이 아님으로 최종 판단.
-- → 그룹 B는 `config/params.yaml`, `core/metrics_utils.py`, `stages/stage2~5*.py`, `backtest/run_backtest.py` 반영 완료. 그룹 A는 다음 세션 진행.
+- **그룹 A 처리(다음 세션)**: `backtest.start_year`(2019)/`end_year`(2025)를 params.yaml에 신설해 단일 출처로 통합. `run_backtest.py`는 argparse `--start`/`--end` 기본값을 `None`으로 바꾸고, CLI 인자가 있으면 그걸 우선하되 없으면 params.yaml 값으로 폴백하도록 수정(기존 CLI 오버라이드 기능은 그대로 유지). `cache_warmup.py`의 `years` 범위(과거엔 `range(2018, 2026)`으로 독립 하드코딩)는 `range(start_year - 1, end_year + 1)`로 파생 계산하도록 변경 — `-1`은 시작 연도 첫 분기의 TTM 계산이 전년도 분기까지 참조하는 구조적 이유. 세 곳 모두 값이 일치하고 기존 하드코딩과 동일한 기본 동작을 내는지 합성 테스트로 검증 완료.
+- → `config/params.yaml`, `core/metrics_utils.py`, `stages/stage2~5*.py`, `backtest/run_backtest.py`, `backtest/cache_warmup.py` 반영 완료. `screening_criteria.md` 반영 완료.
+
+### [결정] DART 캐시 유효기간 분리 (실제 백테스트 실행 전 발견)
+- **이슈**: 사용자가 "이제 백테스트 돌리면 될까?"라고 물어 실행 전 캐시 상태를 점검하다가, `data/cache/dart_*.csv`(21,768개)의 95.9%(20,884개)가 공용 `cache_days`(30일) 기준으로 만료 판정됨을 발견. 캐시 생성 시점(7/31~8/8)과 오늘(9/6) 사이가 30일을 넘었기 때문. 지금 그대로 백테스트를 실행하면 만료된 캐시를 전부 DART API로 재요청하려다 일일 호출 한도(9,500건, `endpoints.json`에 미설정이라 기본값 적용)를 하루 만에 못 채워 `RuntimeError`로 중단될 위험이 컸음.
+- **원인 분석**: `cache_days=30`이 유니버스/시세/펀더멘털/DART 재무제표 4종 캐시에 공통 적용되는 구조였는데, DART 확정 공시 재무제표는 정정공시 등 드문 예외를 빼면 사실상 불변인 과거 데이터라 "30일 지나면 재요청"이라는 정책 자체가 안 맞았음.
+- **해결책**: `QuantDataLoader`에 `dart_cache_days`(기본 3650일) 신설, `_is_cache_valid()`가 `cache_days`를 선택적으로 오버라이드받도록 수정. `get_financial_statements()`만 `dart_cache_days`를 명시적으로 전달하고, 나머지 3종 캐시는 기존 30일 정책 그대로 유지(유니버스 16개·시세 11개·펀더멘털 6개는 pykrx/FDR 호출이라 DART 같은 엄격한 일일 한도 이슈가 없어 그대로 둬도 무방하다고 판단).
+- **검증**: 실제 캐시 파일 타임스탬프로 재계산한 결과, 신규 정책 적용 시 DART 캐시 만료 0건(0.0%)으로 확인.
+- → `data/loader.py` 반영 완료. `screening_criteria.md` 반영 완료.
+
+### [결정] Stage3 `na_reasons` 타입 버그 수정 (실제 백테스트 1차 실행 중 발견)
+- **이슈**: `run_backtest.py` 실제 실행 중 `TypeError: list indices must be integers or slices, not str` 발생 (`stage3_fundamental_improve.py`의 `na_reasons['TURNAROUND_NOT_COMPUTABLE'] = (...)` 지점). `na_reasons`가 `[]`(list)로 초기화돼있는데 코드는 딕셔너리처럼 키로 대입하고 있었음 — 처음부터 있던 버그였으나, 그동안의 합성 테스트가 전부 결측 없는 "정상" 데이터만 줘서 `DATA_TOO_SHORT`/`TURNAROUND_NOT_COMPUTABLE` 분기(신규상장·금융업 등 GPM 계산 불가 종목) 자체를 타본 적이 없어 미발견 상태였음. 실제 DART 데이터로 처음 전체 백테스트를 돌리자마자 노출됨.
+- **해결책**: `na_reasons = []` → `na_reasons = {}`로 초기화 변경 (스키마 정의 `TurnaroundMetrics.na_reasons: dict`와도 일치). 같은 패턴이 Stage1/2/4/5에도 있는지 전수 검색했으나 나머지는 전부 `.append()` 기반 list 사용이라 문제 없음을 확인.
+- **교훈**: 합성 데이터 테스트는 "정상 경로"만 확인하고 결측치·예외 케이스가 실제로 존재하는 실데이터 없이는 이런 타입 불일치를 못 잡는다는 걸 재확인. 앞으로 유사 수정 시 결측/예외 분기를 의도적으로 트리거하는 케이스를 테스트에 포함할 것.
+- → `stages/stage3_fundamental_improve.py` 반영 완료.
+
+### [결정] 백테스트 실행 중단성 개선 (실제 백테스트 2차 실행 중 발견 — 네트워크 순단)
+- **이슈**: 실행 재시도 중 `[FDR/pykrx 펀더멘털 호출 실패] 20190329: Connection aborted...`로 pykrx 호출이 순간 실패했고, `loader.get_market_fundamental_cross_section()`이 빈 `pd.DataFrame()`을 반환하자 `stage4_valuation.py`의 `fund_t0.columns.str.lower()`가 `AttributeError`로 죽으며 다년치 백테스트 전체가 중단됨. 근본적으로 이 프로젝트의 pykrx 호출부는 (DART와 달리) 재시도 로직이 전혀 없었고, `BacktestEngine.run()`의 분기별 루프도 예외 처리가 없어 어느 한 분기의 일시적 오류가 전체 실행을 죽이는 구조였음.
+- **해결책** (3단):
+  1. **재발 빈도 감소**: `endpoints.json`에 이미 있었으나 아무 데서도 안 읽히던 `KRX.max_retries`를 실제로 배선. `QuantDataLoader._fetch_with_retry()` 공용 헬퍼 신설, `get_kospi_universe`/`get_sector_metrics`/`get_market_fundamental_cross_section`의 pykrx 호출부에 전부 적용.
+  2. **국소 방어**: `stage4_valuation.py`가 `fund_t0`/`fund_t4`가 빈 DataFrame으로 와도(재시도까지 소진된 경우) `.str` 접근자로 죽지 않고, 해당 분기 밸류에이션 지표를 결측 처리해 기존 PBR-NaN 구제(exempt) 경로로 자연히 흡수되도록 방어 코드 추가.
+  3. **전체 방어(가장 중요)**: `BacktestEngine.run()`의 분기별 루프 전체(`pipeline.run()` + 벤치마크 수익률 계산)를 try/except로 감싸, 어느 한 분기에서 어떤 예외가 나든(네트워크 오류, 예기치 못한 데이터 이슈 등) 그 분기만 `skipped_low_count=True`로 현금(0%) 처리하고 나머지 분기는 계속 진행하도록 변경. 지금까지 스테이지3 버그와 이번 네트워크 순단, 두 번의 크래시 모두 "한 지점의 문제가 전체 6년치 백테스트를 날려버리는" 동일한 구조적 취약점이 원인이었음을 인지하고, 근본 원인(회복탄력성 부재)을 이번에 해결함.
+- **검증**: (1) 인위적으로 2회 실패 후 성공하는 콜백으로 `_fetch_with_retry` 재시도/소진 동작 확인. (2) 빈 펀더멘털 DataFrame을 주입해 stage4가 크래시 없이 전원 구제 처리하는지 확인. (3) 특정 분기에서 예외를 강제 발생시켜, 그 분기만 현금 처리되고 전후 분기는 정상 처리되는지 확인 — 3가지 모두 합성 테스트로 통과.
+- → `data/loader.py`, `stages/stage4_valuation.py`, `backtest/forward_return.py` 반영 완료.
+
+### [결정] 실제 백테스트 3차 실행 — 조용한 22개 분기 스킵의 진짜 원인 확정 및 후속 조치
+- **경과**: 위 회복탄력성 개선 이후 실제로 다시 실행했으나, `outputs/performance_log.csv`에서 27개 분기 중 2020-06-30 이후 22개(81%)가 `portfolio_return=0.0`이면서 `benchmark_return`까지 비어있는 패턴 발견 — `min_portfolio_size` 미달 스킵이라면 benchmark_return은 정상 계산됐을 것이므로, 매 분기 `pipeline.run()` 자체가 예외를 던지고 있었다는 신호로 판단. 사용자가 실제 로그에서 `[Rate Limit] DART API 일일 호출 한도(9500회)` 메시지를 확인해 DART 일일 호출 한도 소진이 원인임을 확정.
+- **근본 원인 추가 규명**: `dart_call_count`가 프로세스 메모리에만 존재해 스크립트를 재시작할 때마다 0으로 리셋됨. 그날 stage3 버그·stage4 네트워크 오류로 죽은 시도들을 포함해 같은 날 여러 번 재시도하면서, 로컬 카운터는 매번 여유가 있다고 착각했지만 DART 서버 쪽 실제 누적 사용량은 계속 쌓여 실제 한도를 초과시킨 것으로 결론. (사용자가 직접 지적함)
+- **해결책**: `QuantDataLoader`에 `_load_dart_call_count()`/`_persist_dart_call_count()`를 추가해, 오늘 날짜 기준 누적 호출 수를 `dart_call_state.json`에 영속화. 프로세스가 몇 번을 재시작하든 같은 날엔 카운트가 이어지고, 날짜가 바뀌면 자동으로 0부터 다시 센다. `use_cache=False`면 기존처럼 영속화를 건너뛰고 항상 0에서 시작.
+- **검증**: pykrx 등 미설치 의존성을 더미 모듈로 스텁 처리해 `QuantDataLoader`를 부분 로드한 뒤, (1) 최초 실행 0에서 시작, (2) 같은 날 프로세스 재시작 시 이전 카운트(5000)를 이어받아 누적(8000)되는지, (3) 날짜가 바뀌면 0으로 리셋되는지 3가지 시나리오 모두 확인.
+- **후속**: 사용자가 `cache_warmup.py`를 재실행해 27,008건 전량 수집/캐시 적중(데이터 없음 0건)으로 성공 완료 — 이제 실제 백테스트가 신선한 DART 호출을 거의 필요로 하지 않을 것으로 예상.
+- → `data/loader.py` 반영 완료.
+
+### [결정] 백테스트 산출물 파일명에 실행 시각 포함
+- **이슈**: 오늘 하루에만 크래시·재시도로 `run_backtest.py`를 여러 번 실행했는데, `outputs/performance_log.csv`/`portfolio_log.csv`가 고정 파일명이라 매번 이전 결과가 조용히 덮어써짐 — 실행 이력이 하나도 안 남는 문제를 사용자가 지적.
+- **해결책**: `run_backtest.py`가 저장 시 실행 시각(`YYYYMMDD_HHMMSS`, 초 단위까지)을 파일명에 포함하도록 변경(`performance_log_{timestamp}.csv`, `portfolio_log_{timestamp}.csv`) — 날짜만으로는 오늘 같은 날 여러 번 돌린 경우를 못 구분하므로 초 단위까지 포함. 이에 따라 `analysis/visualize.py`의 `__main__` 블록이 고정 파일명을 찾던 것도, `outputs/` 내 타임스탬프 파일 중 가장 최근 것을 자동으로 찾도록 함께 수정(파일명 정렬 순서가 시간 순서와 동일함을 이용).
+- **참고**: 기존에 고정 파일명으로 저장돼 있던 `outputs/performance_log.csv`/`portfolio_log.csv`(22/27분기 비어있던 실패 실행분)는 새 glob 패턴(`performance_log_*.csv`)에 안 걸려 더 이상 자동 선택되지 않음 — 삭제하진 않았으니 필요 없으면 사용자가 직접 정리.
+- **검증**: 임시 디렉터리에 서로 다른 시각의 더미 파일 3개를 만들어, 파일명 정렬 결과가 실제 시간 순서와 일치하고 가장 최근 실행분이 올바르게 선택되는지 확인.
+- → `backtest/run_backtest.py`, `analysis/visualize.py` 반영 완료.
+
+### [결정] 실제 백테스트 4차 실행 — DART 한도 재소진의 진짜 원인 확정(빈 응답 미캐싱 버그)
+- **경과**: `cache_warmup.py` 재예열 성공(27,008건, 데이터없음 0건) 직후 `run_backtest.py`를 실행했으나 2020-06-30 처리 중 다시 `[Rate Limit]` `RuntimeError`로 즉시 중단(지난번 회복탄력성 개선 덕분에 22개 분기가 조용히 스킵되는 대신 정확한 지점에서 멈춤 — 의도한 대로 동작). 사용자가 "캐시가 있는데 왜?"라고 의문 제기.
+- **원인 규명**: `dart_call_state.json`을 확인해 오늘 실제로 9,500회 DART 호출이 소진됐음을 확인. 캐시 디렉터리의 새 파일 수(2,959개)와 실제 소진 호출 수(9,500회)의 차이(~6,500회)에 주목해 `get_financial_statements`를 재검토한 결과, **DART가 빈 응답(개별재무제표만 있는 회사에 CFS를 요청하는 등 정상적인 무응답)을 줄 경우 캐시 파일을 전혀 생성하지 않고 매번 `None`만 반환**하는 버그를 발견. 이 때문에 같은 (ticker, year, report_code, fs_div) 조합이 여러 base_date의 TTM/op_margin 계산에서 반복 참조될 때마다 실시간 API를 낭비 호출하고 있었음 — `cache_warmup.py`가 CFS만 시도하고 성공 여부와 무관하게 `success_count`를 늘리는 방식이라 이 낭비를 사전에 드러내지 못했던 것도 확인.
+- **해결책**: `get_financial_statements`에 `.empty` 마커 파일을 도입 — 빈 응답도 결과로 캐싱하되, 아주 최근 분기는 아직 미공시일 뿐일 수 있어 `dart_cache_days`(영구)가 아닌 일반 `cache_days`(기본 30일)만 적용해 추후 재확인 여지를 남김.
+- **검증**: 같은 (ticker, year, report_code, CFS) 조합을 3회 반복 요청해도 실제 API 호출은 1회만 발생하고, 이후 성공하는 OFS 조합은 정상적으로 캐싱됨을 합성 테스트로 확인.
+- **참고**: 이 수정과 무관하게 오늘 실제 DART 서버에 9,500회가 진짜로 소진됐으므로, 오늘 중 재시도는 여전히 불가 — 내일(한도 리셋 후) 재시도 시 이번 수정 덕분에 동일한 낭비 재발 없이 훨씬 적은 신규 호출로 완주할 것으로 예상.
+- → `data/loader.py` 반영 완료.

@@ -35,10 +35,21 @@ class ValuationScreener:
         # 1. 펀더멘털 데이터 로드 (loader 내부에서 영업일 보정됨)
         fund_t0 = loader.get_market_fundamental_cross_section(base_date)
         fund_t4 = loader.get_market_fundamental_cross_section(date_1y_ago)
-        
-        # 컬럼명을 소문자로 통일 (pykrx 대문자 출력 대응)
-        fund_t0.columns = fund_t0.columns.str.lower()
-        fund_t4.columns = fund_t4.columns.str.lower()
+
+        # pykrx 네트워크 순단 등으로 loader가 빈 DataFrame(컬럼 없음)을 반환하면
+        # .str 접근자 자체가 AttributeError를 던져 전체 백테스트가 죽는다 — 이번 분기만
+        # 밸류에이션 컬럼을 결측 처리(기존 PBR-NaN 구제 경로로 자연히 흡수됨)하고 계속 진행.
+        if fund_t0.empty or fund_t4.empty:
+            self.logger.error(
+                f"[Stage 4] {base_date} 기준 밸류에이션 원자료 조달 실패(pykrx 응답 없음) — "
+                f"이번 분기는 전 종목 밸류에이션 지표를 결측(구제) 처리합니다."
+            )
+            fund_t0 = pd.DataFrame(columns=['ticker', 'bps', 'pbr', 'per'])
+            fund_t4 = pd.DataFrame(columns=['ticker', 'bps'])
+        else:
+            # 컬럼명을 소문자로 통일 (pykrx 대문자 출력 대응)
+            fund_t0.columns = fund_t0.columns.str.lower()
+            fund_t4.columns = fund_t4.columns.str.lower()
 
         # 1년 전 BPS 추출
         fund_t4 = fund_t4[['ticker', 'bps']].rename(columns={'bps': 'bps_1y_ago'})

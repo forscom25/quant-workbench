@@ -53,19 +53,25 @@ def warm_up_dart_cache():
     ttm_denominator = params.get('global', {}).get('ttm_denominator', 'latest_snapshot')
     loader = QuantDataLoader(use_cache=True, ttm_denominator=ttm_denominator)
     pipeline = QuantPipeline(params, loader)
-    
+
+    # run_backtest.py와 동일한 단일 출처(params.yaml backtest.start_year/end_year)에서 기간을 가져옴 —
+    # 여기서만 따로 하드코딩하면 백테스트 기간을 바꿀 때 캐시 예열 범위와 어긋날 위험이 있었음.
+    backtest_params = params.get('backtest', {})
+    start_year = backtest_params.get('start_year', 2019)
+    end_year = backtest_params.get('end_year', 2025)
+
     # 2. 백테스트와 동일하게 KOSPI 영업일 기반으로 생성
-    base_dates = loader.get_quarterly_rebalance_dates(2019, 2025)
-    
+    base_dates = loader.get_quarterly_rebalance_dates(start_year, end_year)
+
     # 3. 프리 필터(Pre-filter)를 통한 타겟 종목 도출
     target_tickers = resolve_target_tickers(pipeline, base_dates)
-    
+
     if not target_tickers:
         print("❌ 후보군으로 선정된 종목이 없습니다. 파이프라인 설정을 확인해주세요.")
         return
 
-    # 4. 재무 데이터 수집 범위 설정
-    years = list(range(2018, 2026)) # 2019년 분석을 위해 2018년부터 필요
+    # 4. 재무 데이터 수집 범위 설정 (시작 연도 첫 분기의 TTM 계산이 전년도 분기까지 참조하므로 -1년 여유)
+    years = list(range(start_year - 1, end_year + 1))
     report_codes = ['11013', '11012', '11014', '11011'] 
     
     total_combinations = len(target_tickers) * len(years) * len(report_codes)

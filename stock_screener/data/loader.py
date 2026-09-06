@@ -15,7 +15,7 @@ import warnings
 
 class QuantDataLoader:
     def __init__(self, use_cache: bool = True, cache_days: int = 30,
-                 ttm_denominator: str = "latest_snapshot"):
+                 ttm_denominator: str = "latest_snapshot", dart_cache_days: int = 3650):
         load_dotenv()
         self.dart_key = os.getenv("DART_API_KEY")
         self.krx_key = os.getenv("KRX_API_KEY")
@@ -25,7 +25,12 @@ class QuantDataLoader:
 
         self.dart = OpenDartReader(self.dart_key)
         self.use_cache = use_cache
+        # 유니버스/시세/펀더멘털처럼 "최신성"이 중요한 캐시의 기본 유효기간
         self.cache_days = cache_days
+        # DART 공시 재무제표는 확정 공시 후 사실상 불변(드문 정정공시 예외)이므로 별도의 훨씬 긴
+        # 유효기간을 둔다. cache_days(30일)를 그대로 썼다면 30일 지난 과거 확정 데이터까지
+        # "만료"로 오판해 불필요하게 DART API를 재호출하며 일일 호출 한도를 낭비하게 됨.
+        self.dart_cache_days = dart_cache_days
 
         # params.yaml의 global.ttm_denominator에 대응 — TTM(4분기 합산) 분자와 짝지을 BS 분모를
         # 가장 최근 분기말 스냅샷으로 볼지("latest_snapshot"), 4개 분기 평균으로 볼지("avg_4q").
@@ -50,11 +55,22 @@ class QuantDataLoader:
                 self.endpoints = json.load(f)
             self.dart_retries = self.endpoints.get("DART", {}).get("max_retries", 3)
         except FileNotFoundError:
+            self.endpoints = {}
             self.dart_retries = 3
+
+        # pykrx 호출(get_market_cap 등)은 이전까지 재시도 로직이 전혀 없어, 네트워크 순단
+        # 한 번에 전체 다년치 백테스트가 죽는 원인이 됐음 — endpoints.json에 이미 있던
+        # (그러나 지금까지 아무 데서도 읽지 않던) KRX.max_retries를 실제로 배선.
+        self.krx_retries = self.endpoints.get("KRX", {}).get("max_retries", 3)
 
         # config 로드 블록 하단에 추가 (DART API 일일 호출량 관리)
         self.dart_daily_limit = self.endpoints.get("DART", {}).get("daily_limit", 9500)
-        self.dart_call_count = 0
+        # 🚨 [수정] dart_call_count를 프로세스 메모리에만 두면 재시작할 때마다 0으로 리셋되어,
+        # 같은 날 여러 번 실행(크래시 후 재시도 등)할 경우 로컬 카운터는 계속 여유가 있다고
+        # 착각하지만 DART 서버 쪽 실제 일일 한도는 프로세스와 무관하게 계속 누적되는 문제가
+        # 실제로 발생함. 날짜별 카운트를 파일로 영속화해 프로세스 재시작에도 이어지게 한다.
+        self._dart_count_file = self.cache_dir / "dart_call_state.json"
+        self.dart_call_count = self._load_dart_call_count()
 
         # sj_div(재무제표 종류) 필터가 추가된 다차원 매핑 룰
         self.ACCOUNT_MAPPING = {
@@ -141,12 +157,63 @@ class QuantDataLoader:
                 }
         }
 
-    def _is_cache_valid(self, filepath: Path) -> bool:
-        """캐시 유효기간(30일) 검증"""
+    def _load_dart_call_count(self) -> int:
+        """
+        오늘 날짜 기준 누적 DART 호출 수를 영속 파일(dart_call_state.json)에서 복구합니다.
+        파일이 없거나, 저장된 날짜가 오늘이 아니면(새로운 날) 0부터 새로 셉니다.
+        use_cache=False면 영속화 자체를 건너뛰고 항상 0에서 시작합니다(기존 동작 유지).
+        """
+        if not self.use_cache:
+            return 0
+        try:
+            with open(self._dart_count_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if state.get("date") == date.today().isoformat():
+                return int(state.get("count", 0))
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
+            pass
+        return 0
+
+    def _persist_dart_call_count(self):
+        """현재까지의 DART 호출 수를 오늘 날짜와 함께 파일에 저장 — 프로세스가 중간에
+        죽거나 재시작돼도 같은 날엔 이어서 카운트되도록 한다."""
+        if not self.use_cache:
+            return
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._dart_count_file, "w", encoding="utf-8") as f:
+                json.dump({"date": date.today().isoformat(), "count": self.dart_call_count}, f)
+        except Exception as e:
+            self.logger.warning(f"[DART 호출 카운트 저장 실패] {e}")
+
+    def _is_cache_valid(self, filepath: Path, cache_days: Optional[int] = None) -> bool:
+        """캐시 유효기간 검증. cache_days 미지정 시 self.cache_days(기본 30일) 사용 —
+        DART 재무제표처럼 불변 데이터를 캐싱하는 호출부는 self.dart_cache_days를 명시적으로 전달한다."""
         if not filepath.exists():
             return False
+        effective_days = cache_days if cache_days is not None else self.cache_days
         mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
-        return (datetime.now() - mtime).days < self.cache_days
+        return (datetime.now() - mtime).days < effective_days
+
+    def _fetch_with_retry(self, fetch_fn, label: str, retries: Optional[int] = None, backoff_sec: float = 1.5):
+        """
+        pykrx/FDR 등 외부 API 호출을 감싸 일시적 네트워크 오류(순단 등)에 재시도합니다.
+        fetch_fn: 인자 없이 즉시 호출 가능한 콜러블 (예: lambda: stock.get_market_cap(date_str, market="KOSPI"))
+        모든 재시도가 소진되면 마지막 예외를 그대로 올려보내며, 호출부가 이를 잡아 결측(구제) 처리하거나
+        (stage4처럼) BacktestEngine.run()의 분기 단위 예외 처리로 흡수되도록 한다.
+        """
+        attempts = retries if retries is not None else self.krx_retries
+        last_err = None
+        for attempt in range(attempts):
+            try:
+                return fetch_fn()
+            except Exception as e:
+                last_err = e
+                self.logger.warning(f"[{label} 재시도 {attempt + 1}/{attempts}] {e}")
+                if attempt < attempts - 1:
+                    time.sleep(backoff_sec)
+        self.logger.error(f"[{label} 최종 실패] {attempts}회 재시도 후에도 실패: {last_err}")
+        raise last_err
 
     def _get_nearest_past_bday(self, target_date: date) -> str:
         """
@@ -196,7 +263,9 @@ class QuantDataLoader:
             # [완벽 수정] 상단 캐시 읽기: 인코딩 명시 추가 (BOM 및 0 잘림 방지)
             return pd.read_csv(cache_file, dtype={'ticker': str}, encoding='utf-8-sig')
             
-        df = stock.get_market_cap(date_str, market="KOSPI")
+        df = self._fetch_with_retry(
+            lambda: stock.get_market_cap(date_str, market="KOSPI"), label=f"KOSPI 시가총액({date_str})"
+        )
         if df.empty:
             raise ValueError(f"{date_str} 기준 KOSPI 데이터가 없습니다. (휴장일 가능성)")
             
@@ -251,11 +320,17 @@ class QuantDataLoader:
         self.logger.info("실전 데이터 조달: pykrx 기간별 수익률/거래대금 API 호출 중...")
         
         # 1. 기간별 등락률 및 거래대금 (KOSPI 전 종목)
-        df_1m = stock.get_market_price_change(date_1m, date_str, market="KOSPI").reset_index()
+        df_1m = self._fetch_with_retry(
+            lambda: stock.get_market_price_change(date_1m, date_str, market="KOSPI"), label=f"1개월 등락률({date_str})"
+        ).reset_index()
         time.sleep(1.0)
-        df_6m = stock.get_market_price_change(date_6m, date_str, market="KOSPI").reset_index()
+        df_6m = self._fetch_with_retry(
+            lambda: stock.get_market_price_change(date_6m, date_str, market="KOSPI"), label=f"6개월 등락률({date_str})"
+        ).reset_index()
         time.sleep(1.0)
-        df_1y = stock.get_market_price_change(date_1y, date_str, market="KOSPI").reset_index()
+        df_1y = self._fetch_with_retry(
+            lambda: stock.get_market_price_change(date_1y, date_str, market="KOSPI"), label=f"1년 등락률({date_str})"
+        ).reset_index()
         
         # 컬럼명 정리 및 등락률 단위 변환 (% -> 소수점)
         df_1m = df_1m[['티커', '등락률', '거래대금']].rename(columns={'티커': 'ticker', '등락률': 'return_1m', '거래대금': 'vol_1m'})
@@ -307,25 +382,38 @@ class QuantDataLoader:
     def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011', fs_div: str = 'CFS') -> Optional[pd.DataFrame]:
         """재시도(Retry) 및 캐시 무효화가 적용된 DART 데이터 로더"""
         cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.csv"
-        
-        if self.use_cache and self._is_cache_valid(cache_file):
+        # "데이터 없음"(개별재무제표만 있는 회사의 CFS 요청 등 정상적인 무응답)도 결과로 캐싱하는
+        # 마커 파일. 🚨 [수정] 과거엔 이 케이스를 캐싱하지 않아, 같은 조합을 요청할 때마다
+        # (분기가 겹치는 다른 base_date에서, 혹은 재실행할 때마다) 매번 실시간 API를 낭비 호출했음
+        # — 실제로 이 버그 때문에 DART 일일 한도가 예상보다 훨씬 빨리 소진되는 사례가 발생함.
+        empty_marker = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.empty"
+
+        # 확정 공시된 재무제표는 사실상 불변이므로 dart_cache_days(기본 3650일)를 별도 적용
+        if self.use_cache and self._is_cache_valid(cache_file, cache_days=self.dart_cache_days):
             return pd.read_csv(cache_file)
+        # "없음" 마커는 일반 cache_days(기본 30일)만 적용 — 아주 최근 분기는 아직 미공시일 뿐일
+        # 수 있어, 영구 캐싱(dart_cache_days)하면 나중에 실제로 공시돼도 계속 없다고 오판할 위험이 있음
+        if self.use_cache and self._is_cache_valid(empty_marker):
+            return None
 
         for attempt in range(self.dart_retries):
             try:
                 # 일반 Exception이 아닌 RuntimeError로 발생시켜 명확히 구분
                 if self.dart_call_count >= self.dart_daily_limit:
                     raise RuntimeError(f"[Rate Limit] DART API 일일 호출 한도({self.dart_daily_limit}회)에 도달하여 스크리닝을 중단합니다.")
-                
+
                 self.dart_call_count += 1
+                self._persist_dart_call_count()
 
                 fs_df = self.dart.finstate_all(ticker, year, reprt_code=report_code, fs_div=fs_div)
                 if fs_df is not None and not fs_df.empty:
                     if self.use_cache:
                         fs_df.to_csv(cache_file, index=False, encoding='utf-8-sig')
                     return fs_df
+                if self.use_cache:
+                    empty_marker.touch()
                 break
-                
+
             except RuntimeError as limit_err:
                 # 🚨 Rate Limit 에러는 재시도하지 않고 즉시 메인 프로그램으로 에러를 던짐
                 raise limit_err
@@ -799,8 +887,10 @@ class QuantDataLoader:
             return pd.read_csv(cache_file, dtype={'ticker': str}, encoding='utf-8-sig')
 
         try:
-            # pykrx를 통한 펀더멘털 데이터 수집
-            df = stock.get_market_fundamental(date_str, market="KOSPI")
+            # pykrx를 통한 펀더멘털 데이터 수집 (일시적 네트워크 오류는 재시도로 흡수)
+            df = self._fetch_with_retry(
+                lambda: stock.get_market_fundamental(date_str, market="KOSPI"), label=f"펀더멘털({date_str})"
+            )
             if df.empty:
                 return pd.DataFrame()
                 
