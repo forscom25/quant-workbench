@@ -8,7 +8,10 @@ global:
 stage1_neglected_sector:
   stage1_return_weight: 0.5
   stage1_volume_weight: 0.5
-  stage1_pass_ratio: 0.4
+  # 2026-09-08: 0.4 -> 0.5로 완화(1차 검증, A안). 방산처럼 수개 표준편차 벗어난 극단적
+  # 모멘텀 섹터까지 구제하진 못하지만(그건 하드컷→penalty 항 전환이 필요, 보류 중),
+  # 경계선에 있는 섹터들은 더 담아볼 수 있는지 검증하기 위한 보수적 확대.
+  stage1_pass_ratio: 0.5
 
 # 2단계: 섹터 내 우량주 탐색
 stage2_sector_leaders:
@@ -29,6 +32,8 @@ stage3_fundamental_improve:
   cost_cutting_only_sales_decline_threshold: -0.05   # 매출 역성장 경고 태그 임계치 (-5% 이하 시 태그)
   zscore_clip_lower: 0.01                            # Z-score 산출 전 극단값 클리핑 하한 분위
   zscore_clip_upper: 0.99                            # Z-score 산출 전 극단값 클리핑 상한 분위
+  cash_flow_rescue_enabled: true                     # 컷오프 미달이어도 매출성장+건전한 OCF면 구제
+  cash_flow_rescue_min_sales_growth: 0.0              # 구제 대상 최소 매출성장률(이 값 초과 필요, 순수 테마 배제)
 
 # 4단계: 밸류에이션 기반 저평가 탐색 (Composite Score 방식)
 stage4_valuation:

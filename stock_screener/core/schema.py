@@ -60,6 +60,10 @@ class TurnaroundMetrics:
     is_cost_cutting_warning: bool
     inventory_turnover_yoy: Optional[float] = None
     na_reasons: dict = field(default_factory=dict)
+    # 현금흐름 구제(penalty 상쇄) 판단용 — 매출은 늘지만 판관비 증가·마진 하락으로 컷오프
+    # 미달인 종목도, OCF가 건실하면(테마성 부풀리기가 아니라 실제 현금이 들어오면) 구제한다.
+    ocf: Optional[float] = None
+    net_income: Optional[float] = None
 
 @dataclass
 class ValuationMetrics:

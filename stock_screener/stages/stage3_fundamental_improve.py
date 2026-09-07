@@ -29,6 +29,13 @@ class FundamentalImproveScreener:
         self.zscore_clip_lower = params.get('zscore_clip_lower', 0.01)
         self.zscore_clip_upper = params.get('zscore_clip_upper', 0.99)
 
+        # 현금흐름 구제(penalty 상쇄) 설정 — "매출은 느는데 판관비가 더 빨리 늘어 컷오프 미달"인
+        # 종목이라도, 실제 매출 성장이 있고(순수 테마 배제) OCF가 건실하면(회계상 숫자놀음이 아니라
+        # 진짜 현금이 들어오면) 기계적 탈락시키지 않고 구제한다. 방산 등 확정 수주 기반으로 설비/인력에
+        # 선제 투자하는 업종이, 아직 마진에 반영 안 됐다는 이유만으로 걸러지는 걸 막기 위함.
+        self.cash_flow_rescue_enabled = params.get('cash_flow_rescue_enabled', True)
+        self.cash_flow_rescue_min_sales_growth = params.get('cash_flow_rescue_min_sales_growth', 0.0)
+
         self.logger = logging.getLogger(__name__)
 
     def run(self, sector_tickers_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
@@ -55,7 +62,9 @@ class FundamentalImproveScreener:
                     TurnaroundCols.stage3_score: np.nan,
                     TurnaroundCols.is_cost_cutting_warning: False,
                     TurnaroundCols.inventory_turnover_yoy: np.nan, # 스키마 요구사항(Optional)
-                    TurnaroundCols.na_reasons: na_reasons
+                    TurnaroundCols.na_reasons: na_reasons,
+                    TurnaroundCols.ocf: np.nan,
+                    TurnaroundCols.net_income: np.nan
                 })
                 continue
 
@@ -90,11 +99,29 @@ class FundamentalImproveScreener:
             # 경고 태그 (매출 역성장)
             is_cost_cutting_warning = bool(pd.notna(sales_growth_yoy) and sales_growth_yoy <= self.sales_decline_threshold)
 
+            # --- 현금흐름 구제 판단용 원자료 (TTM) ---
+            # Stage5가 어차피 같은 티커에 대해 이 값을 다시 조회하므로, 대부분 캐시에서 즉시 반환됨
+            ocf = net_income = np.nan
+            if self.cash_flow_rescue_enabled:
+                raw_ttm = loader.get_ttm_financials(ticker, base_date)
+                ocf = raw_ttm.get('operating_cash_flow', np.nan)
+                net_income = raw_ttm.get('net_income', np.nan)
+
+                cash_flow_healthy = pd.notna(ocf) and pd.notna(net_income) and ocf > 0 and ocf >= net_income
+                real_growth = pd.notna(sales_growth_yoy) and sales_growth_yoy > self.cash_flow_rescue_min_sales_growth
+                if cash_flow_healthy and real_growth:
+                    na_reasons['CASH_FLOW_QUALITY_RESCUE'] = (
+                        MetricStatus.CAUTION,
+                        "판관비/마진 악화로 컷오프 미달이나, 매출성장과 현금흐름 건전성 확인돼 구제"
+                    )
+
             metrics_data.append({
-                'ticker': ticker, 
+                'ticker': ticker,
                 'sector': sector,
                 TurnaroundCols.sga_yoy_avg: sga_yoy_avg,
                 TurnaroundCols.sales_growth_yoy: sales_growth_yoy,
+                TurnaroundCols.ocf: ocf,
+                TurnaroundCols.net_income: net_income,
                 TurnaroundCols.gpm_yoy: gpm_yoy,
                 TurnaroundCols.stage3_score: np.nan,
                 TurnaroundCols.is_cost_cutting_warning: is_cost_cutting_warning,
@@ -121,11 +148,16 @@ class FundamentalImproveScreener:
         
         na_reasons_str = df[TurnaroundCols.na_reasons].astype(str)
         is_data_short = na_reasons_str.str.contains('DATA_TOO_SHORT', na=False)
+        # TURNAROUND_NOT_COMPUTABLE(GPM 계산 불가 업종)만 컷오프 계산 대상에서 제외한다.
+        # CASH_FLOW_QUALITY_RESCUE는 여기 포함하지 않음 — 랭킹 모집단에서 미리 빼버리면 컷오프
+        # 문턱값 자체가 달라져 버려서, 구제가 필요 없던 종목까지 의도치 않게 영향을 줌. 대신
+        # 정상적으로 랭킹에 참여시킨 뒤, 컷오프 미달로 탈락한 종목 중 구제 태그가 있는 것만
+        # 아래에서 별도로 되살린다.
         is_exempt = na_reasons_str.str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
-        
+
         # 구제 대상 점수 NaN 처리
         df.loc[is_exempt, TurnaroundCols.stage3_score] = np.nan
-        
+
         # 데이터 부족 종목 기계적 탈락 처리
         df.loc[is_data_short, 'fail_reason'] = FailReason.DATA_TOO_SHORT.value
 
@@ -133,13 +165,22 @@ class FundamentalImproveScreener:
         valid_mask = ~is_data_short & ~is_exempt
         if valid_mask.any():
             cutoff_val = df.loc[valid_mask, TurnaroundCols.stage3_score].quantile(1.0 - self.pass_percentile)
-            
+
             # 컷오프 미달 탈락 처리
             is_below_cutoff = valid_mask & (df[TurnaroundCols.stage3_score] < cutoff_val)
             df.loc[is_below_cutoff, 'fail_reason'] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
 
+        # 현금흐름 구제: 컷오프 미달로 탈락 판정된 종목 중, 매출성장+건전한 OCF가 확인된
+        # 종목(CASH_FLOW_QUALITY_RESCUE 태그)만 되살린다. 점수 자체는 그대로 두어(NaN 처리 안 함)
+        # 어떤 근거로 컷오프에 못 미쳤는지 투명하게 남긴다.
+        cash_flow_rescued = na_reasons_str.str.contains('CASH_FLOW_QUALITY_RESCUE', na=False)
+        is_rescued = cash_flow_rescued & (df['fail_reason'] == FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value)
+        df.loc[is_rescued, 'fail_reason'] = None
+
         # Status 로깅을 위한 변수 할당
         passed_count = df['fail_reason'].isnull().sum()
+        if is_rescued.any():
+            self.logger.info(f"[Stage 3] 현금흐름 구제로 {int(is_rescued.sum())}개 종목 추가 통과")
         self.logger.info(f"[Stage 3] {len(df)}개 종목 중 {passed_count}개 턴어라운드 종목 통과 (상위 {self.pass_percentile*100}%)")
         
         # ---------------------------------------------------------
