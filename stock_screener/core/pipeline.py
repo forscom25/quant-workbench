@@ -37,13 +37,20 @@ class QuantPipeline:
         if stage_result_df.empty:
             return pd.DataFrame()
 
-        # 'fail_reason'은 매 단계 새로 판정되는 값이므로, input_df에 남아있는 이전 값
-        # (필터링을 통과한 입력이라 항상 None)을 지우고 이번 stage의 판정으로 교체한다.
-        base_df = input_df.drop(columns=['fail_reason'], errors='ignore')
+        # 'fail_reason'과 'na_reasons'는 매 단계 새로 판정되는 값이므로, input_df에 남아있는
+        # 이전 단계의 값(예: Stage2도 'na_reasons' 컬럼을 쓰므로 이름이 겹침)을 지우고 이번
+        # stage의 판정으로 교체한다. 🔴 버그 수정: 예전에는 'fail_reason'만 지웠는데, 이러면
+        # 'na_reasons'처럼 이름이 겹치는 다른 컬럼은 difference()에서 제외되어 이전 단계의
+        # 오래된 값이 그대로 남아버렸다(Stage3/5의 실제 판정 근거가 감사 로그에서 사라지는 문제,
+        # 통과/탈락 판정 자체는 각 stage 내부에서 이미 확정되므로 영향 없었지만 사후 추적이 불가능했음).
+        # ticker(조인 키)를 제외한 겹치는 컬럼은 전부 새 단계 결과가 우선하도록 base_df에서 미리 제거한다.
+        overlapping_cols = [c for c in stage_result_df.columns if c in input_df.columns and c != 'ticker']
+        base_df = input_df.drop(columns=overlapping_cols, errors='ignore')
 
         # 중복되는 컬럼(예: sector) 충돌 방지: ticker만 남기고 교집합 제외
         cols_to_use = stage_result_df.columns.difference(base_df.columns).tolist()
-        cols_to_use.append('ticker')
+        if 'ticker' not in cols_to_use:
+            cols_to_use.append('ticker')
 
         # ticker를 기준으로 inner merge하여 이전 데이터를 누적
         return pd.merge(base_df, stage_result_df[cols_to_use], on='ticker', how='inner')
