@@ -109,7 +109,14 @@ class FundamentalImproveScreener:
                 ocf = raw_ttm.get('operating_cash_flow', np.nan)
                 net_income = raw_ttm.get('net_income', np.nan)
 
-                cash_flow_healthy = pd.notna(ocf) and pd.notna(net_income) and ocf > 0 and ocf >= net_income
+                # 2026-09-10 재설계: 적자 기업은 net_income이 음수라 'ocf >= net_income'이 OCF만
+                # 양수면 사실상 항상 참이 되어 이익의 질을 전혀 검증하지 못했다(구제가 후보의
+                # 32%까지 남발된 원인 중 하나). 흑자 기업(net_income > 0)만 구제 대상으로 좁힌다 —
+                # 적자 성장주가 좋은 성과를 낼 확률은 흑자 성장주보다 낮다고 보는 것이 합리적.
+                cash_flow_healthy = (
+                    pd.notna(ocf) and pd.notna(net_income)
+                    and ocf > 0 and net_income > 0 and ocf >= net_income
+                )
                 real_growth = pd.notna(sales_growth_yoy) and sales_growth_yoy > self.cash_flow_rescue_min_sales_growth
                 if cash_flow_healthy and real_growth:
                     na_reasons.append('CASH_FLOW_QUALITY_RESCUE')

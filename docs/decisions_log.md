@@ -266,3 +266,12 @@
 - **해결책**: `core/schema.py`의 `TurnaroundMetrics.na_reasons`를 `dict` → `str`(comma-joined)로 변경. `stages/stage3_fundamental_improve.py`의 `na_reasons['KEY'] = (MetricStatus, msg)` 딕셔너리 대입 방식을 `na_reasons.append('KEY')` + `",".join(na_reasons)`로 전환(Stage2/5와 동일 패턴). 어제 추가한 `SCORE_NOT_COMPUTABLE` 사후 태깅도 딕셔너리 원소 대입 대신 문자열 이어붙이기로 변경. 더 이상 쓰이지 않는 `MetricStatus` import와 `core/schema.py`의 `field` import도 함께 정리.
 - **검증**: 2021-09-30 분기 재실행으로 `na_reasons` 컬럼이 순수 `str` 타입임을 확인하고, 태그별 개수(SCORE_NOT_COMPUTABLE 4, DATA_TOO_SHORT 1, TURNAROUND_NOT_COMPUTABLE 4)와 최종 통과 종목 수(12개)가 리팩터 전과 완전히 동일함을 확인 — 순수 타입 정리였고 필터링 결과엔 영향 없음.
 - → `core/schema.py`, `stages/stage3_fundamental_improve.py` 반영 완료. `screening_criteria.md`(TODO 종료 처리, 공통 설계 원칙 3번 갱신) 반영 완료.
+
+### [결정] Stage3 현금흐름 구제 재설계 후 재검증 — 여전히 비활성화 유지로 최종 결론
+- **배경**: Tier 2의 마지막 항목. 2026-09-09에 비활성화했던 현금흐름 구제를, 사용자와 두 축으로 재설계 방향을 논의: (1) 매출성장 임계치를 얼마나 올릴지 → 15% 초과로 결정(TODO에 이미 언급됐던 값, "업계 평균 대비 뚜렷한 고성장"). (2) 적자 기업에서 `OCF≥순이익` 조건이 무력화되는 문제 → `net_income`이 음수면 OCF가 조금만 양수여도 항상 조건을 만족해버려 이익의 질 검증이 사실상 안 되고 있었음을 발견, 사용자가 "적자 기업보다 흑자 기업이 좋은 성과를 낼 확률이 높다"는 논리로 흑자 기업(`net_income > 0`)만 구제 대상으로 좁히는 데 동의.
+- **구현**: `stages/stage3_fundamental_improve.py`의 `cash_flow_healthy` 조건에 `net_income > 0`을 추가. `params.yaml`의 `cash_flow_rescue_min_sales_growth`를 0.0 → 0.15로 상향.
+- **1차 검증(단일 분기)**: 2021-09-30 샘플로 재확인한 결과, 구제 대상 43개(우연히 구 버전과 동일 개수, 티커 자체가 같은 건 아님)가 실제로 전부 매출성장 15% 초과·순이익 흑자 조건을 만족함을 직접 수치로 확인(매출성장 최소 15.2%, 순이익 전원 양수) — 로직이 의도대로 정확히 동작.
+- **2차 검증(전체 백테스트)**: 27개 분기 전체 재실행. 결과: 누적수익률 47.3%(구제 비활성화 baseline 54.3% 대비 낮음), CAGR 36.2%(vs 56.2%), MDD -24.7%(vs -25.1%, 근소하게 더 나음), Sharpe 3.18(vs 3.35), 승률 29.6%(vs 37.0%). 무차별 구제로 인한 심각한 악화(비교 대상: 구 버전 단독 실행 시 누적 29.0%)는 확실히 해소됐으나, 구제를 아예 끈 것보다는 전반적으로 소폭 낮은 성과.
+- **최종 결정**: 사용자에게 두 결과를 제시하고 선택을 구함 — "숫자가 일관되게 없는 쪽이 나았다"는 이유로 구제 비활성화 유지를 최종 선택. `cash_flow_rescue_enabled: false`로 확정하되, 재설계된 로직과 기준값(`cash_flow_rescue_min_sales_growth: 0.15`, `net_income > 0` 조건)은 향후 다시 시도할 때 참고할 수 있도록 코드에 그대로 남겨둠.
+- **참고**: MDD만큼은 재설계 버전이 baseline보다 근소하게 더 낮아(하락 방어 측면에서), 방어적 철학을 우선하면 재설계 버전도 완전히 근거 없는 선택은 아니었음 — 다만 누적수익률·Sharpe·승률이 전부 밀리는 폭이 MDD 개선폭보다 커서 비활성화 쪽으로 결론.
+- → `config/params.yaml`(`cash_flow_rescue_enabled: false` 최종 확정, `cash_flow_rescue_min_sales_growth: 0.15`로 재설계값 보존), `stages/stage3_fundamental_improve.py`(`net_income > 0` 조건 추가) 반영 완료. `screening_criteria.md`(현금흐름 구제 절·TODO 갱신) 반영 완료.
