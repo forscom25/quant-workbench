@@ -90,18 +90,27 @@ class ValuationScreener:
         # 4. FailReason 태깅 로직 (Row 삭제 안 함)
         # ---------------------------------------------------------
         df['fail_reason'] = None
-        
+        df[ValuationCols.na_reasons] = ""
+
         # 자본잠식 등 PBR 결측치 구제 대상 마킹 (점수는 무효화하지만 탈락시키지는 않음)
         is_exempt = df[ValuationCols.pbr].isna() | (df[ValuationCols.pbr] <= 0)
+        df.loc[is_exempt, ValuationCols.na_reasons] = "PBR_NOT_COMPUTABLE"
         df.loc[is_exempt, ValuationCols.stage4_score] = np.nan
 
         valid_mask = ~is_exempt
         if valid_mask.any():
             cutoff_val = df.loc[valid_mask, ValuationCols.stage4_score].quantile(1.0 - self.pass_percentile)
-            
+
             # 컷오프 미달 탈락 처리
             is_below_cutoff = valid_mask & (df[ValuationCols.stage4_score] < cutoff_val)
             df.loc[is_below_cutoff, 'fail_reason'] = FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value
+
+        # 🔴 2026-09-09 발견 버그 수정: PBR 결측(is_exempt)이 아닌데도 bps_growth 등 다른
+        # 구성요소 결측으로 stage4_score가 NaN이 되면, `NaN < cutoff_val` 비교가 항상 False라
+        # 아무 태그 없이 조용히 통과했다. 명시적으로 태깅한다(컷오프 계산엔 이미 포함돼 있었으나
+        # 어차피 NaN이라 quantile 계산에 영향 없음 — pandas가 NaN을 자동 제외).
+        score_nan_unexplained = df[ValuationCols.stage4_score].isna() & ~is_exempt
+        df.loc[score_nan_unexplained, ValuationCols.na_reasons] = "SCORE_NOT_COMPUTABLE"
 
         # 로깅
         passed_count = df['fail_reason'].isnull().sum()

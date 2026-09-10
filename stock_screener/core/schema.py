@@ -73,6 +73,7 @@ class ValuationMetrics:
     bps_growth: float
     stage4_score: float
     is_pbr_value_trap: bool
+    na_reasons: str = ""
 
 @dataclass
 class FinancialHealthMetrics:

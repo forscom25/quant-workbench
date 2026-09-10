@@ -250,3 +250,12 @@
 - **최종 결정**: `cash_flow_rescue_enabled: false`로 확정 비활성화(재설계 없이는 재활성화하지 않음). `stage1_pass_ratio: 0.5`는 Config A 단독 검증에서 성능 개선이 확인되어 그대로 유지.
 - **부수 발견(별도 TODO로 이관)**: 위 조사 과정에서, Stage3/4의 컴포짓 스코어 하위 요소 중 하나가 (그 stage가 명시적으로 처리하는 예외 경로 밖에서) NaN이 되면 스코어 전체가 NaN이 되고, `NaN < cutoff` 비교가 항상 False라 `na_reasons`에 아무 태그도 없이 자동 통과되는 경로를 발견. 2021-09-30 샘플 기준 Stage3 134개 중 4개(3%), Stage4 46개 중 1개(2%) 수준으로 규모는 작지만, "왜 통과했는지 감사 불가능한" 종목이 소수 존재함 — 각 stage에 `SCORE_NOT_COMPUTABLE` 같은 명시적 태그를 추가하는 별도 후속 작업으로 보류.
 - → `core/pipeline.py`(`_accumulate_results` 컬럼 충돌 수정), `config/params.yaml`(`cash_flow_rescue_enabled: false` 확정) 반영 완료.
+
+## 2026-09-10
+
+### [결정] TODO 우선순위 재검토 및 Tier 1(저위험·소규모) 항목 2건 해소
+- **배경**: 어제 세션에서 쌓인 TODO 14개를 리스크·비용 기준으로 재분류. "지금 바로 처리할 가치가 있는" Tier 1로 (1) Stage3/4 NaN 자동통과 태깅, (2) 섹터-종목 기준일 역전(look-ahead bias) 방지 재도입 여부 결정 2건을 선정해 진행.
+- **(1) NaN 자동통과 태깅**: `stages/stage3_fundamental_improve.py`와 `stages/stage4_valuation.py`에 `is_data_short`/`is_exempt`(또는 PBR 결측) 어느 쪽으로도 명시 처리되지 않았는데 컴포짓 스코어가 NaN인 행을 감지해 `na_reasons`에 `SCORE_NOT_COMPUTABLE` 태그를 남기고 기존 exempt 로직과 동일하게 컷오프 계산에서 제외하도록 수정. Stage4는 이 김에 그동안 아예 없었던 `na_reasons` 컬럼 자체를 신설(스키마에도 `ValuationMetrics.na_reasons` 추가)하고, 기존부터 있었지만 무태그였던 PBR 결측 구제 경로에도 `PBR_NOT_COMPUTABLE` 태그를 함께 부여.
+- **검증**: 2021-09-30 분기로 파이프라인을 재실행해 (a) 태그 개수가 전날 진단 스크립트로 확인했던 수치(Stage3 4건, Stage4 1건)와 정확히 일치, (b) 최종 통과 종목 수(12개)와 구성이 수정 전과 동일함을 확인 — 필터링 로직은 그대로 두고 감사 가능성만 보강했음을 재확인.
+- **(2) look-ahead bias 재도입 검토**: 결론부터 말하면 코드 추가 없이 TODO 종료. `core/pipeline.py`의 `run(base_date)`이 `get_kospi_universe(base_date)`와 `get_sector_metrics(base_date)`를 항상 동일한 `base_date` 인자로 호출하고, 두 함수 모두 내부적으로 같은 `_get_nearest_past_bday(base_date)`(숨은 전역 상태 없는 순수 함수)로 영업일을 해석함을 코드 추적으로 확인 — 섹터/종목 데이터가 서로 다른 기준일을 참조할 경로 자체가 현재 구조엔 없음. 게다가 섹터 데이터의 원천(pykrx 일별 시세·거래대금)은 DART 재무제표와 달리 거래일 종가가 확정되는 순간 그 시점 값으로 즉시 확정되는 데이터라 "공시 시차"라는 개념 자체가 적용되지 않는다. 옛 `inject_sector_info`(`StockProfile` 소속, 이미 삭제됨)가 막던 문제는 그 구 아키텍처에 국한된 것으로 결론짓고, 현재 구조에서는 방어할 실제 시나리오가 없다고 판단.
+- → `core/schema.py`(`ValuationMetrics.na_reasons` 신규), `stages/stage3_fundamental_improve.py`, `stages/stage4_valuation.py` 반영 완료. `screening_criteria.md`(TODO 2건 종료 처리, 공통 설계 원칙 4번 갱신) 반영 완료.

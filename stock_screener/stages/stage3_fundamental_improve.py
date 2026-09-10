@@ -155,6 +155,19 @@ class FundamentalImproveScreener:
         # 아래에서 별도로 되살린다.
         is_exempt = na_reasons_str.str.contains('TURNAROUND_NOT_COMPUTABLE', na=False)
 
+        # 🔴 2026-09-09 발견 버그 수정: is_data_short/is_exempt 어느 쪽으로도 명시 처리되지
+        # 않은 결측 경로(예: 4분기 전 매출/판관비/매출원가만 결측)로 sales_z/sga_inv_z/gpm_z
+        # 중 하나가 NaN이 되면 덧셈으로 stage3_score 전체가 NaN이 되는데, 이후 컷오프 비교
+        # `NaN < cutoff_val`은 항상 False라 아무 태그 없이 조용히 통과해버렸다. 발견 당시
+        # 통과 종목이 있다는 사실만으로는 감사가 불가능했던 문제 — 명시적으로 태깅해 다른
+        # 구제 경로와 동일하게 컷오프 계산에서도 제외한다.
+        score_nan_unexplained = df[TurnaroundCols.stage3_score].isna() & ~is_data_short & ~is_exempt
+        for idx in df.index[score_nan_unexplained]:
+            df.at[idx, TurnaroundCols.na_reasons]['SCORE_NOT_COMPUTABLE'] = (
+                MetricStatus.NOT_COMPUTABLE, "일부 지표 결측으로 합산 점수 계산 불가"
+            )
+        is_exempt = is_exempt | score_nan_unexplained
+
         # 구제 대상 점수 NaN 처리
         df.loc[is_exempt, TurnaroundCols.stage3_score] = np.nan
 
