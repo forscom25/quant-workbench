@@ -275,3 +275,9 @@
 - **최종 결정**: 사용자에게 두 결과를 제시하고 선택을 구함 — "숫자가 일관되게 없는 쪽이 나았다"는 이유로 구제 비활성화 유지를 최종 선택. `cash_flow_rescue_enabled: false`로 확정하되, 재설계된 로직과 기준값(`cash_flow_rescue_min_sales_growth: 0.15`, `net_income > 0` 조건)은 향후 다시 시도할 때 참고할 수 있도록 코드에 그대로 남겨둠.
 - **참고**: MDD만큼은 재설계 버전이 baseline보다 근소하게 더 낮아(하락 방어 측면에서), 방어적 철학을 우선하면 재설계 버전도 완전히 근거 없는 선택은 아니었음 — 다만 누적수익률·Sharpe·승률이 전부 밀리는 폭이 MDD 개선폭보다 커서 비활성화 쪽으로 결론.
 - → `config/params.yaml`(`cash_flow_rescue_enabled: false` 최종 확정, `cash_flow_rescue_min_sales_growth: 0.15`로 재설계값 보존), `stages/stage3_fundamental_improve.py`(`net_income > 0` 조건 추가) 반영 완료. `screening_criteria.md`(현금흐름 구제 절·TODO 갱신) 반영 완료.
+
+### [결정] fail_reason / na_reasons 전체 태그 레퍼런스 문서화
+- **배경**: "전체 파이프라인이 어느 정도 구축됐으니 탈락 이유를 지금 작성해볼까"라는 사용자 제안. 세 가지로 해석 가능해(실제 종목별 탈락사유 리포트 스크립트 / 태그 체계 문서화 / main.py 착수) 먼저 범위를 확인한 결과, 코드는 안 건드리고 태그 체계를 문서로 정리하는 쪽으로 확정.
+- **작업**: `screening_criteria.md`에 각 stage 절 대신 한곳에서 조회할 수 있는 "부록: fail_reason / na_reasons 전체 레퍼런스" 절을 신설. `FailReason` Enum(5종), stage별 `na_reasons` 태그(9종), `warning_tags`/boolean 경고 필드(6종) 세 표로 정리했고, 문서만 보고 옮겨적지 않도록 전부 코드 grep으로 실제 존재 여부를 재검증.
+- **부수 발견**: (1) `FailReason.CRITICAL_METRIC_NOT_COMPUTABLE`이 스키마에 정의만 되어 있고 실제 코드 어디에서도 쓰인 적이 없는 죽은 값임을 확인(전수 grep) — 당장 제거하진 않고 레퍼런스에 "미사용"으로 명시만 함. (2) Stage3/4 개별 절의 "업종 편차 주의" 목록이 최근 추가한 `SCORE_NOT_COMPUTABLE`(양쪽 다), `PBR_NOT_COMPUTABLE`(Stage4, 태그명 자체가 명시돼 있지 않았음)을 누락하고 있어 함께 보강.
+- → `screening_criteria.md`(부록 신설, 목차 갱신, Stage3/4 "업종 편차 주의" 절 보강) 반영 완료. 코드 변경 없음.

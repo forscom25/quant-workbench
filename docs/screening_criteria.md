@@ -10,6 +10,7 @@
 - [4단계: 밸류에이션](#4단계-밸류에이션)
 - [5단계: 재무 건전성](#5단계-재무-건전성)
 - [공통 설계 원칙](#공통-설계-원칙)
+- [부록: fail_reason / na_reasons 전체 레퍼런스](#부록-fail_reason--na_reasons-전체-레퍼런스)
 - [미정 사항 (TODO)](#미정-사항-todo)
 - [변경 이력](#변경-이력)
 
@@ -92,6 +93,7 @@
 - `TURNAROUND_NOT_COMPUTABLE`: 재고자산·매출원가(GPM) 개념 자체가 없는 업종 (은행 등 금융업) → 결측치 처리되어 **점수 필터링 면제(구제 통과)** 
 - `DATA_TOO_SHORT`: YoY 비교에 필요한 데이터 미달 → 업종 특성이 아닌 데이터 가용성 문제이므로 **기계적 탈락** (구제 대상 아님) 
 - `CASH_FLOW_QUALITY_RESCUE`: 위 "현금흐름 구제" 참고 — 컷오프 미달이지만 매출성장+건전한 OCF로 구제됨
+- `SCORE_NOT_COMPUTABLE` (2026-09-10 추가): 위 두 예외 경로 밖에서 세부 지표(매출/판관비/매출원가 등)가 결측돼 합산 점수 자체가 계산 불가 → **점수 필터링 면제(구제 통과)**. 태깅 전엔 `NaN < cutoff` 비교가 항상 False라 무태그로 조용히 통과했던 경로를 명시화한 것 — 실제 통과 여부는 동일, 감사 가능성만 확보
 
 ---
 
@@ -115,8 +117,9 @@
 
 **데이터 소스**: `pbr`/`bps`/`per`는 DART 계정을 조합해 직접 계산하지 않고 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값을 그대로 사용한다 (발행주식수 별도 조회 불필요).  근거는 [`architecture.md`](./architecture.md#밸류에이션-원자료는-pykrx-기시산출값-사용) 참고. 
 
-**업종 편차 주의 / na_reasons 태그**
-- PBR 미산출(`NaN`) 또는 0 이하(자본잠식 등): **임시 구제(EXEMPT) 통과** — 최종 판단은 5단계 재무 건전성에서 자본잠식 여부로 걸러내는 쪽에 위임.  *pipeline.py가 5단계에서 실제로 이 임시 통과 종목을 재검증하는지 구현 시 확인 완료.*
+**업종 편차 주의 / na_reasons 태그** (2026-09-10, Stage4에 `na_reasons` 컬럼 자체를 신설하며 태그명 명시)
+- `PBR_NOT_COMPUTABLE`: PBR 미산출(`NaN`) 또는 0 이하(자본잠식 등) → **임시 구제(EXEMPT) 통과** — 최종 판단은 5단계 재무 건전성에서 자본잠식 여부로 걸러내는 쪽에 위임
+- `SCORE_NOT_COMPUTABLE`: PBR은 정상이나 `bps_growth`(1년 전 BPS 결측 등) 쪽 결측으로 합산 점수 계산 불가 → **점수 필터링 면제(구제 통과)**. Stage3와 동일하게, 태깅 전엔 `NaN < cutoff` 비교가 항상 False라 무태그로 조용히 통과했던 경로
 
 ---
 
@@ -167,6 +170,51 @@
 
 ---
 
+## 부록: fail_reason / na_reasons 전체 레퍼런스
+
+각 stage 절에 흩어져 있는 태그를 한곳에서 조회하기 위한 참조표(2026-09-10 작성). 개별 태그의 배경/처리 근거는 위 해당 stage 절과 [`core/schema.py`](../stock_screener/core/schema.py)를 우선 참고하고, 이 표는 "지금 실제 코드에 존재하는 태그가 무엇인지" 확인하는 용도로 쓴다 — 전부 코드를 직접 grep해 검증했다.
+
+### `fail_reason` (row 단위 최종 통과/탈락 판정, `FailReason` Enum)
+
+| 값 | 설정 주체 | 의미 |
+|---|---|---|
+| `sector_not_qualified` | `pipeline.py` (Stage1 섹터 판정을 소속 티커에 상속) | 소속 섹터 자체가 Stage1 컷오프 미달 — 개별 기업 펀더멘털은 전혀 평가되지 않고 탈락 |
+| `quality_cutoff_not_met` | Stage2 | ROE/ROIC/영업이익률변동성 중 (구제되지 않은) 조건 미달 |
+| `composite_score_below_cutoff` | Stage1(섹터 단위), Stage3, Stage4, Stage5 | 합산 Z-score가 해당 단계 상위 N% 컷오프 미달 — 4개 단계가 공유하는 가장 흔한 사유 |
+| `data_too_short` | Stage3 | YoY 비교용 6개 분기 데이터 미달(신규상장 등), 구제 대상 아님 |
+| `critical_metric_not_computable` | (없음) | 스키마에 정의만 되어 있고 실제 코드 어디에서도 쓰이지 않는 죽은 값(2026-09-10 전수 grep으로 확인) |
+
+`fail_reason`이 `None`(결측)이면 해당 단계 통과, 값이 채워지면 탈락이며 row 자체는 삭제되지 않고 `history` dict에 보존된다(사후 감사용).
+
+### `na_reasons` (탈락 사유가 아닌, "판정 근거"를 보조 설명하는 태그. Stage 2/3/4/5 전부 comma-joined string)
+
+| Stage | 태그 | 의미 | 처리 |
+|---|---|---|---|
+| 2 | `OP_MARGIN_STD_NOT_COMPUTABLE` | 영업이익률 변동성 계산용 유효 분기(`op_margin_min_quarters`, 기본 4) 미달 | 구제(exempt) — 변동성 필터만 면제 |
+| 2 | `ROIC_NOT_COMPUTABLE` | 투하자본 계산 불가(금융업/지주사, 자본잠식 등) | 구제(exempt) — ROIC 필터만 면제 |
+| 3 | `TURNAROUND_NOT_COMPUTABLE` | GPM 계산 불가 업종(매출원가 개념 없는 금융업 등) | 구제(exempt) — 점수 NaN 처리, 컷오프 계산 대상서 제외 |
+| 3 | `DATA_TOO_SHORT` | YoY 비교용 6개 분기 데이터 미달 | **기계적 탈락**(구제 대상 아님) — `fail_reason`도 동일 값으로 채워짐 |
+| 3 | `CASH_FLOW_QUALITY_RESCUE` | 컷오프 미달이나 매출성장(`cash_flow_rescue_min_sales_growth` 초과, 재설계 후 15%)+흑자+건전한 OCF로 구제 대상 | 구제(fail_reason을 `None`으로 되살림) — **현재 `cash_flow_rescue_enabled: false`라 비활성, 태그 자체가 안 붙음**(2026-09-10 항목 참고) |
+| 3 | `SCORE_NOT_COMPUTABLE` | 위 두 경로 밖의 결측(매출/판관비/매출원가 등)으로 합산 점수 계산 불가 | 구제(exempt) |
+| 4 | `PBR_NOT_COMPUTABLE` | PBR 미산출 또는 0 이하(자본잠식 등) | 구제(exempt) — 최종 판단은 5단계 자본잠식 재검증에 위임 |
+| 4 | `SCORE_NOT_COMPUTABLE` | PBR은 정상이나 BPS 성장률 등 결측으로 점수 계산 불가 | 구제(exempt) |
+| 5 | `FINANCE_SECTOR_CAUTION` | 금융/증권/보험/은행/지주 섹터 — 부채비율 절대비교 부적합 | 부채비율 요소 제외, ICR 단독 점수로 대체(탈락 아님) |
+
+### `warning_tags` 및 boolean 경고 필드 (통과/탈락과 무관, 포트폴리오 구성 시 참고용)
+
+`na_reasons`/`fail_reason`과 달리 스크리닝 판정 자체엔 전혀 영향을 주지 않고, 최종 편입 후 비중 조절 등에 참고하라고 남기는 신호다.
+
+| Stage | 필드/태그 | 발동 조건 |
+|---|---|---|
+| 1 | `is_value_trap_warning` (bool) | 최근 1개월 낙폭이 6개월 평균 월간 낙폭보다 더 가팔라짐(낙폭 가속) |
+| 3 | `is_cost_cutting_warning` (bool) | 매출성장률이 `cost_cutting_only_sales_decline_threshold`(기본 -5%) 이하로 역성장 |
+| 4 | `is_pbr_value_trap` (bool) | 저PBR로 고득점(`stage4_score > 0`)인데 ROE가 `value_trap_roe_threshold`(기본 5%) 미만 |
+| 5 | `[ICR미달]` | `interest_coverage_ratio < icr_warning_threshold`(기본 1.0) |
+| 5 | `[이익질주의]` | `OCF < 당기순이익` (이익이 현금으로 뒷받침되지 않음) |
+| 5 | `[과다부채]` | 비금융 섹터 한정, 부채비율이 섹터 내 상위 `debt_ratio_warning_percentile`(기본 90%ile) 초과 |
+
+---
+
 ## 미정 사항 (TODO)
 
 - [ ] 1단계 z_return, z_volume 가중치(w1, w2) 초기값 0.5/0.5 → forward-return 상관관계로 백테스트 튜닝 
@@ -205,3 +253,4 @@
 | 2026-09-08 | 최초 완주한 백테스트(2019~2025, 27분기) 결과 검토 — 누적수익률 전략 50.4% vs KOSPI 94.7%로 저조하나 MDD는 전략이 더 낮음(-25.2% vs -32.3%). 원인 진단 결과 Stage1의 "소외 섹터" 필터가 섹터 단위로 최근 수익률이 낮은 곳만 통과시켜, 코리안 디스카운트 해소 랠리(전력·반도체·방산, 2024-12~2025-09 KOSPI 중앙값 대비 5~25배 상승)를 원천 배제함을 실제 파이프라인 실행(`history` dict 추적)으로 확인. 두 갈래 원인 확인: ① 방산(079550)은 Stage1 자체에서 `sector_not_qualified`로 배제(섹터 수익률 z=-2.9, 개별 기업 펀더멘털 평가 기회 자체가 없음). ② 전기장비(019180)는 Stage1은 통과했으나 Stage3에서 `composite_score_below_cutoff`로 탈락(매출성장 +19%는 양호했으나 판관비 증가율 +28.6%가 매출성장보다 빨라 마진 하락). "하드컷 → penalty 항" 전환(B안, 전 요인 통합 스코어링)과 "계산비용 게이트/모멘텀 신호 분리"(C안) vs "국소 조정"(A안)을 비교한 결과, B안은 Stage1이 겸하고 있는 DART 호출량 절감(퍼널이 좁아질수록 이후 단계 계산량도 줄어듦) 효과를 없애 일일 한도 문제를 재발시킬 위험이 커 보류. 우선 A안 적용: (1) Stage1 `pass_ratio` 0.4→0.5로 완화(1차 검증용). (2) Stage3에 현금흐름 구제 신호 신설 — 매출성장 있고 TTM OCF가 건실(`OCF>0` 이고 `OCF≥순이익`)하면 판관비/GPM 악화로 인한 컷오프 미달이어도 구제(`CASH_FLOW_QUALITY_RESCUE`), 매출 역성장은 현금흐름이 좋아도 구제 대상 아님 — 확정 수주 기반 선투자(방산 등)와 순수 테마성 지출을 매출의 현금 전환 여부로 구분하려는 의도. 동일한 재무수치에 현금흐름만 다르게 준 합성 테스트로 구제 대상만 정확히 걸러짐을 검증 |
 | 2026-09-09 | A안 적용 후 재실행한 백테스트가 오히려 전 지표에서 악화(누적수익률 50.4%→29.0%, MDD -25.2%→-31.5%)되어 Stage1 완화(Config A)와 Stage3 현금흐름 구제(Config B)를 각각 단독 실행하는 A/B 격리 테스트 진행. Config A는 단독으로 baseline보다도 개선(누적 54.3%, MDD -25.1%)된 반면, pass_ratio를 고정한 "Both ON vs Config A" 비교에서 구제 활성화 쪽이 확연히 나빠(누적 29.0% vs 54.3%) 구제 로직이 원인으로 확정. 조사 과정에서 `core/pipeline.py`의 `_accumulate_results()`가 `fail_reason`만 특별 처리하고 있어 Stage2/3/5가 공유하는 `na_reasons`(및 Stage3/5가 공유하는 `ocf`/`net_income`) 컬럼명이 겹치면 이후 단계가 새로 계산한 값이 병합 시 조용히 버려지고 이전 단계의 오래된 값이 남는 버그를 발견·수정(겹치는 컬럼은 항상 최신 단계 결과가 우선하도록 일반화) — 통과/탈락 판정 자체엔 영향 없었지만 `history` dict를 통한 사후 감사가 Stage3부터 무력화돼 있었음. 수정 후 재확인한 실측 결과, 구제 조건("매출성장 0%↑ + OCF≥순이익")이 Stage3 후보의 32%(2021-09-30 샘플)를 무차별 통과시키고 있었음을 확정 — `cash_flow_rescue_enabled: false`로 비활성화 확정, `stage1_pass_ratio: 0.5`는 단독 검증된 개선이라 유지. 부수적으로 Stage3/4의 컴포짓 스코어가 처리되지 않은 결측 경로로 NaN이 될 때 `na_reasons` 태그 없이 자동 통과되는 소규모(3%/2%) 경로도 발견해 TODO로 이관 |
 | 2026-09-10 | 전날 발견한 TODO 2건 해소. (1) Stage3/4 NaN 자동통과 태깅: 컴포짓 스코어의 하위 요소가 (기존 exempt 조건 밖에서) 결측이면 `NaN < cutoff` 비교가 항상 False가 되어 무태그로 통과하던 경로에 `SCORE_NOT_COMPUTABLE` 태그를 명시 추가(Stage4는 기존에 없던 `na_reasons` 컬럼 자체를 신설하며 기존 PBR 결측 구제 경로에도 `PBR_NOT_COMPUTABLE` 태그를 함께 부여). 실제 파이프라인 재실행으로 태그 개수(Stage3 4건, Stage4 1건, 전날 진단과 일치)와 최종 통과 종목 수·구성이 기존과 동일함을 확인 — 필터링 결과에 영향 없이 감사 가능성만 개선. (2) 섹터-종목 기준일 역전(look-ahead bias) 재검토: `pipeline.run(base_date)`이 `get_kospi_universe`/`get_sector_metrics`를 동일한 `base_date`로 호출하고 둘 다 같은 순수함수(`_get_nearest_past_bday`, 숨은 전역 상태 없음)로 영업일을 해석함을 코드 추적으로 확인, 섹터 데이터 원천(pykrx 시세)은 DART와 달리 공시 시차 개념이 아예 적용되지 않는 실시간 확정 데이터라는 점까지 더해 별도 체크가 방어할 실제 시나리오가 현재 구조엔 없다고 결론 — `inject_sector_info`가 막던 문제는 이미 삭제된 구 아키텍처(`StockProfile`)에 국한됐던 것으로 판단, 코드 추가 없이 TODO 종료. (3) `na_reasons` 타입 통일: Stage3만 `dict[str, tuple[MetricStatus, str]]`이던 것을 Stage2/4/5와 같은 comma-joined `str`로 변경 — 값이 다시 읽힌 적이 없어(항상 태그명 포함 여부만 확인) 손실 없음을 확인 후 진행, 재실행으로 태그 개수·최종 통과 종목 동일함을 검증. (4) Stage3 현금흐름 구제 재설계: 매출성장 임계치 0%→15% 상향, 적자 기업(`net_income<=0`) 배제(구 버전은 이 경우 `OCF≥순이익`이 사실상 항상 참이 되어 이익의 질 검증이 무력화됨) 후 전체 백테스트 재검증 — 무차별 구제 문제(2021-09-30 샘플 구제 대상이 실제로 15%↑·흑자 기업으로 좁혀짐을 확인)는 해소됐으나, 성과가 구제 완전 비활성화 대비 여전히 낮아(누적 47.3% vs 54.3%, Sharpe 3.18 vs 3.35, MDD만 -24.7%로 근소 우위) 최종 비활성화 유지로 결론. 재설계된 코드/기준값은 향후 재시도를 위해 보존 |
+| 2026-09-10 (2) | `fail_reason`/`na_reasons`/`warning_tags` 전체 레퍼런스를 새 "부록" 절로 추가 — 5개 stage에 흩어져 있던 태그를 코드 전수 grep으로 검증해 표 3개(fail_reason 5종, na_reasons 9종, warning_tags/boolean 경고 6종)로 정리. Stage3/4 절의 개별 "업종 편차 주의" 목록에 누락돼 있던 `SCORE_NOT_COMPUTABLE`(둘 다), `PBR_NOT_COMPUTABLE`(Stage4, 태그명 명시 안 돼 있던 것) 보강. `CRITICAL_METRIC_NOT_COMPUTABLE`이 스키마에 정의만 되고 실제로 쓰인 적 없는 죽은 값임을 확인해 명시 |
