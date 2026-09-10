@@ -259,3 +259,10 @@
 - **검증**: 2021-09-30 분기로 파이프라인을 재실행해 (a) 태그 개수가 전날 진단 스크립트로 확인했던 수치(Stage3 4건, Stage4 1건)와 정확히 일치, (b) 최종 통과 종목 수(12개)와 구성이 수정 전과 동일함을 확인 — 필터링 로직은 그대로 두고 감사 가능성만 보강했음을 재확인.
 - **(2) look-ahead bias 재도입 검토**: 결론부터 말하면 코드 추가 없이 TODO 종료. `core/pipeline.py`의 `run(base_date)`이 `get_kospi_universe(base_date)`와 `get_sector_metrics(base_date)`를 항상 동일한 `base_date` 인자로 호출하고, 두 함수 모두 내부적으로 같은 `_get_nearest_past_bday(base_date)`(숨은 전역 상태 없는 순수 함수)로 영업일을 해석함을 코드 추적으로 확인 — 섹터/종목 데이터가 서로 다른 기준일을 참조할 경로 자체가 현재 구조엔 없음. 게다가 섹터 데이터의 원천(pykrx 일별 시세·거래대금)은 DART 재무제표와 달리 거래일 종가가 확정되는 순간 그 시점 값으로 즉시 확정되는 데이터라 "공시 시차"라는 개념 자체가 적용되지 않는다. 옛 `inject_sector_info`(`StockProfile` 소속, 이미 삭제됨)가 막던 문제는 그 구 아키텍처에 국한된 것으로 결론짓고, 현재 구조에서는 방어할 실제 시나리오가 없다고 판단.
 - → `core/schema.py`(`ValuationMetrics.na_reasons` 신규), `stages/stage3_fundamental_improve.py`, `stages/stage4_valuation.py` 반영 완료. `screening_criteria.md`(TODO 2건 종료 처리, 공통 설계 원칙 4번 갱신) 반영 완료.
+
+### [결정] Tier 2 착수 — `na_reasons` 타입 stage 전체 통일
+- **배경**: 어제 발견한 컬럼 병합 버그(2026-09-09)가 하필 `na_reasons`처럼 stage마다 타입이 다른(Stage3만 dict, 나머지는 comma-joined string) 컬럼에서 터졌던 만큼, 재발 방지 차원에서 타입부터 통일하기로 함. Tier 2로 분류했던 "Stage3 현금흐름 구제 재설계"보다 위험·비용이 훨씬 작아 먼저 처리.
+- **조사**: `MetricStatus`/설명 문구(Stage3 dict의 튜플 두 번째 값)를 stage3 자체 외에 어디서도 다시 읽은 적이 없음을 전수 grep으로 확인 — 모든 소비처가 `.astype(str).str.contains('태그명')` 패턴만 사용. 즉 dict가 들고 있던 추가 정보는 write-only였고 실제로 손실 없이 단순화 가능.
+- **해결책**: `core/schema.py`의 `TurnaroundMetrics.na_reasons`를 `dict` → `str`(comma-joined)로 변경. `stages/stage3_fundamental_improve.py`의 `na_reasons['KEY'] = (MetricStatus, msg)` 딕셔너리 대입 방식을 `na_reasons.append('KEY')` + `",".join(na_reasons)`로 전환(Stage2/5와 동일 패턴). 어제 추가한 `SCORE_NOT_COMPUTABLE` 사후 태깅도 딕셔너리 원소 대입 대신 문자열 이어붙이기로 변경. 더 이상 쓰이지 않는 `MetricStatus` import와 `core/schema.py`의 `field` import도 함께 정리.
+- **검증**: 2021-09-30 분기 재실행으로 `na_reasons` 컬럼이 순수 `str` 타입임을 확인하고, 태그별 개수(SCORE_NOT_COMPUTABLE 4, DATA_TOO_SHORT 1, TURNAROUND_NOT_COMPUTABLE 4)와 최종 통과 종목 수(12개)가 리팩터 전과 완전히 동일함을 확인 — 순수 타입 정리였고 필터링 결과엔 영향 없음.
+- → `core/schema.py`, `stages/stage3_fundamental_improve.py` 반영 완료. `screening_criteria.md`(TODO 종료 처리, 공통 설계 원칙 3번 갱신) 반영 완료.

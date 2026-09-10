@@ -4,10 +4,9 @@ import logging
 from core.metrics_utils import calc_zscore, compute_composite_score, apply_percentile_filter
 
 from core.schema import (
-    TurnaroundCols, 
-    TurnaroundMetrics, 
-    FailReason, 
-    MetricStatus, 
+    TurnaroundCols,
+    TurnaroundMetrics,
+    FailReason,
     validate_schema
 )
 
@@ -48,21 +47,24 @@ class FundamentalImproveScreener:
             # 1. 시계열 원자료 조달
             q_series = loader.get_quarterly_financials_series(ticker, base_date, n_quarters=self.lookback_q)
             
-            na_reasons = {}  # dict로 초기화 (아래에서 na_reasons['KEY'] = (...) 형태로 딕셔너리처럼 사용됨)
+            # 2026-09-10: dict -> comma-joined string으로 통일(Stage2/4/5와 동일 타입).
+            # MetricStatus/설명 문구는 어느 stage에서도 na_reasons에서 다시 읽힌 적이 없어(항상
+            # .str.contains()로 태그명만 확인) 손실 없이 단순화 가능함을 확인 후 진행.
+            na_reasons = []
 
             # 🔴 버그 2 수정: q_series[0]만 반복 검사하던 논리 오류 해결
             if len(q_series) < 6 or all(pd.isna(q.get('revenue', np.nan)) for q in q_series[:6]):
-                na_reasons['DATA_TOO_SHORT'] = (MetricStatus.NOT_COMPUTABLE, "최근 6분기 재무 데이터 부족")
+                na_reasons.append('DATA_TOO_SHORT')
                 metrics_data.append({
-                    'ticker': ticker, 
+                    'ticker': ticker,
                     'sector': sector,
-                    TurnaroundCols.sga_yoy_avg: np.nan, 
-                    TurnaroundCols.sales_growth_yoy: np.nan, 
+                    TurnaroundCols.sga_yoy_avg: np.nan,
+                    TurnaroundCols.sales_growth_yoy: np.nan,
                     TurnaroundCols.gpm_yoy: np.nan,
                     TurnaroundCols.stage3_score: np.nan,
                     TurnaroundCols.is_cost_cutting_warning: False,
                     TurnaroundCols.inventory_turnover_yoy: np.nan, # 스키마 요구사항(Optional)
-                    TurnaroundCols.na_reasons: na_reasons,
+                    TurnaroundCols.na_reasons: ",".join(na_reasons),
                     TurnaroundCols.ocf: np.nan,
                     TurnaroundCols.net_income: np.nan
                 })
@@ -90,7 +92,7 @@ class FundamentalImproveScreener:
             # --- 매출총이익률 (GPM) ---
             gp_t0 = q_series[0].get('gross_profit', np.nan)
             if pd.isna(gp_t0):
-                na_reasons['TURNAROUND_NOT_COMPUTABLE'] = (MetricStatus.NOT_COMPUTABLE, "GPM 계산 불가")
+                na_reasons.append('TURNAROUND_NOT_COMPUTABLE')
             
             gpm_t0 = safe_div(gp_t0, rev_t0)
             gpm_t4 = safe_div(q_series[4].get('gross_profit', np.nan), rev_t4)
@@ -110,10 +112,7 @@ class FundamentalImproveScreener:
                 cash_flow_healthy = pd.notna(ocf) and pd.notna(net_income) and ocf > 0 and ocf >= net_income
                 real_growth = pd.notna(sales_growth_yoy) and sales_growth_yoy > self.cash_flow_rescue_min_sales_growth
                 if cash_flow_healthy and real_growth:
-                    na_reasons['CASH_FLOW_QUALITY_RESCUE'] = (
-                        MetricStatus.CAUTION,
-                        "판관비/마진 악화로 컷오프 미달이나, 매출성장과 현금흐름 건전성 확인돼 구제"
-                    )
+                    na_reasons.append('CASH_FLOW_QUALITY_RESCUE')
 
             metrics_data.append({
                 'ticker': ticker,
@@ -126,7 +125,7 @@ class FundamentalImproveScreener:
                 TurnaroundCols.stage3_score: np.nan,
                 TurnaroundCols.is_cost_cutting_warning: is_cost_cutting_warning,
                 TurnaroundCols.inventory_turnover_yoy: np.nan,
-                TurnaroundCols.na_reasons: na_reasons
+                TurnaroundCols.na_reasons: ",".join(na_reasons)
             })
 
         df = pd.DataFrame(metrics_data)
@@ -146,7 +145,7 @@ class FundamentalImproveScreener:
         # 🔴 버그 1 수정: 행을 삭제하지 않고 fail_reason 컬럼으로 이력 관리
         df['fail_reason'] = None
         
-        na_reasons_str = df[TurnaroundCols.na_reasons].astype(str)
+        na_reasons_str = df[TurnaroundCols.na_reasons]
         is_data_short = na_reasons_str.str.contains('DATA_TOO_SHORT', na=False)
         # TURNAROUND_NOT_COMPUTABLE(GPM 계산 불가 업종)만 컷오프 계산 대상에서 제외한다.
         # CASH_FLOW_QUALITY_RESCUE는 여기 포함하지 않음 — 랭킹 모집단에서 미리 빼버리면 컷오프
@@ -162,10 +161,10 @@ class FundamentalImproveScreener:
         # 통과 종목이 있다는 사실만으로는 감사가 불가능했던 문제 — 명시적으로 태깅해 다른
         # 구제 경로와 동일하게 컷오프 계산에서도 제외한다.
         score_nan_unexplained = df[TurnaroundCols.stage3_score].isna() & ~is_data_short & ~is_exempt
-        for idx in df.index[score_nan_unexplained]:
-            df.at[idx, TurnaroundCols.na_reasons]['SCORE_NOT_COMPUTABLE'] = (
-                MetricStatus.NOT_COMPUTABLE, "일부 지표 결측으로 합산 점수 계산 불가"
-            )
+        has_existing_tag = score_nan_unexplained & (df[TurnaroundCols.na_reasons] != "")
+        has_no_tag = score_nan_unexplained & (df[TurnaroundCols.na_reasons] == "")
+        df.loc[has_existing_tag, TurnaroundCols.na_reasons] += ",SCORE_NOT_COMPUTABLE"
+        df.loc[has_no_tag, TurnaroundCols.na_reasons] = "SCORE_NOT_COMPUTABLE"
         is_exempt = is_exempt | score_nan_unexplained
 
         # 구제 대상 점수 NaN 처리
@@ -186,7 +185,7 @@ class FundamentalImproveScreener:
         # 현금흐름 구제: 컷오프 미달로 탈락 판정된 종목 중, 매출성장+건전한 OCF가 확인된
         # 종목(CASH_FLOW_QUALITY_RESCUE 태그)만 되살린다. 점수 자체는 그대로 두어(NaN 처리 안 함)
         # 어떤 근거로 컷오프에 못 미쳤는지 투명하게 남긴다.
-        cash_flow_rescued = na_reasons_str.str.contains('CASH_FLOW_QUALITY_RESCUE', na=False)
+        cash_flow_rescued = df[TurnaroundCols.na_reasons].str.contains('CASH_FLOW_QUALITY_RESCUE', na=False)
         is_rescued = cash_flow_rescued & (df['fail_reason'] == FailReason.COMPOSITE_SCORE_BELOW_CUTOFF.value)
         df.loc[is_rescued, 'fail_reason'] = None
 

@@ -1,4 +1,4 @@
-from dataclasses import dataclass, fields, field
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import Optional
 from enum import Enum, IntEnum
@@ -59,7 +59,10 @@ class TurnaroundMetrics:
     stage3_score: float
     is_cost_cutting_warning: bool
     inventory_turnover_yoy: Optional[float] = None
-    na_reasons: dict = field(default_factory=dict)
+    # 2026-09-10: dict -> comma-joined string으로 통일(Stage2/4/5와 동일 타입). 어느 stage도
+    # MetricStatus/설명 문구를 na_reasons에서 되읽은 적이 없어(항상 태그명 문자열 포함 여부만
+    # 확인) 손실 없이 단순화, 겹치는 컬럼명이 stage 간 병합될 때 타입 불일치로 인한 위험도 제거.
+    na_reasons: str = ""
     # 현금흐름 구제(penalty 상쇄) 판단용 — 매출은 늘지만 판관비 증가·마진 하락으로 컷오프
     # 미달인 종목도, OCF가 건실하면(테마성 부풀리기가 아니라 실제 현금이 들어오면) 구제한다.
     ocf: Optional[float] = None
