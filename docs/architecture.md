@@ -26,17 +26,22 @@ stock_screener/
 ├── backtest/
 │   └── forward_return.py   # 각 단계별 신호 검증 및 포트폴리오 시뮬레이션
 │   └── cache_warmup.py     # 백테스트 전용 DART API 스마트 캐시 예열 스크립트
-├── analysis/               # [조회-읽기] 백테스트 산출물 분석 및 렌더링 (CQS 패턴)
-│   ├── stats.py            # 순수 계산: Sharpe, MDD, 승률, 누적 수익률 등
-│   └── visualize.py        # stats.py 결과를 차트로 렌더링
+├── analysis/               # [조회-읽기] 파이프라인/백테스트 산출물 분석 및 렌더링 (CQS 패턴)
+│   ├── stats.py                # 순수 계산: Sharpe, MDD, 승률, 누적 수익률 등 (백테스트용)
+│   ├── visualize.py            # stats.py 결과를 차트로 렌더링 (백테스트용)
+│   ├── screening_stats.py      # 순수 계산: 단계별 깔때기 요약, 티커별 탈락사유 리포트 (실전 스크리닝용)
+│   └── visualize_screening.py  # screening_stats.py 결과를 차트/CSV로 렌더링 (실전 스크리닝용)
 ├── outputs/                # 파생 산출물 저장 (Git 추적 제외)
-│   ├── charts/             # visualize.py가 생성한 이미지 파일
-│   ├── test_performance_log.csv
-│   └── test_portfolio_log.csv
 ├── scripts/
 │   └── clean_cache.py      # 비영업일 기준으로 어긋난 캐시 파일 정리 유틸리티
-└── main.py                 # (미착수) 실전(오늘 기준) 스크리닝 실행용 진입점 — 현재는 빈 파일이며
-                             # 실질적인 진입점은 backtest/run_backtest.py. 착수 여부는 decisions_log 참고.
+├── debugging/               # 임시 조사·재현용 스크립트 모음 (2026-09-10, 예전 주피터 노트북 3개를 대체)
+│   ├── smoke_test_loader.py    # QuantDataLoader 단위 스모크 테스트
+│   ├── run_single_stage.py     # 소수 종목으로 stage 하나만 격리 실행
+│   ├── trace_ticker.py         # 특정 종목이 어느 stage에서 왜 탈락/통과했는지 추적
+│   └── inspect_raw_dart.py     # DART 원본 계정 테이블 덤프
+└── main.py                 # 실전(기준일 지정 가능, 기본 오늘) 스크리닝 진입점. pipeline.run()을
+                             # 1회 실행해 결과(최종 통과 종목 + 단계별 이력)를 outputs/에 저장만
+                             # 하고(Command), 요약·시각화는 analysis/screening_*.py에 위임(Query).
 ```
 
 ## 2. 역할 분담 및 책임 경계

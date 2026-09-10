@@ -281,3 +281,16 @@
 - **작업**: `screening_criteria.md`에 각 stage 절 대신 한곳에서 조회할 수 있는 "부록: fail_reason / na_reasons 전체 레퍼런스" 절을 신설. `FailReason` Enum(5종), stage별 `na_reasons` 태그(9종), `warning_tags`/boolean 경고 필드(6종) 세 표로 정리했고, 문서만 보고 옮겨적지 않도록 전부 코드 grep으로 실제 존재 여부를 재검증.
 - **부수 발견**: (1) `FailReason.CRITICAL_METRIC_NOT_COMPUTABLE`이 스키마에 정의만 되어 있고 실제 코드 어디에서도 쓰인 적이 없는 죽은 값임을 확인(전수 grep) — 당장 제거하진 않고 레퍼런스에 "미사용"으로 명시만 함. (2) Stage3/4 개별 절의 "업종 편차 주의" 목록이 최근 추가한 `SCORE_NOT_COMPUTABLE`(양쪽 다), `PBR_NOT_COMPUTABLE`(Stage4, 태그명 자체가 명시돼 있지 않았음)을 누락하고 있어 함께 보강.
 - → `screening_criteria.md`(부록 신설, 목차 갱신, Stage3/4 "업종 편차 주의" 절 보강) 반영 완료. 코드 변경 없음.
+
+### [결정] main.py 착수 + debugging/ 폴더로 디버깅 노트북 3개 대체
+- **배경**: 백테스트 중 없이 진행 가능한 TODO 목록에서 사용자가 `main.py`를 선택. 전체 파이프라인/백테스트가 이미 안정화됐으니 실전 진입점을 만들 시점이라 판단. 추가로 사용자가 갖고 있던 디버깅용 주피터 노트북 3개(`01_data_loader_test`, `02_strategy_pipeline`, `03_debugging_and_backtest`)를 `stock_screener/debugging/` 폴더의 `.py` 스크립트로 재구성해달라는 요청도 함께 받음.
+- **main.py 설계**: `backtest/run_backtest.py`가 여러 분기를 순회하는 것과 달리, `main.py`는 (기본 오늘, `--date`로 override 가능한) 단일 기준일에 대해 `pipeline.run()`을 한 번 실행해 결과를 저장만 한다(Command). 요약·시각화는 새로 만든 `analysis/screening_stats.py`(순수 함수 `build_funnel_summary`/`build_rejection_report`)와 `analysis/visualize_screening.py`(정적 PNG + 동적 Plotly HTML)에 위임(Query) — `backtest/run_backtest.py`↔`analysis/visualize.py` 관계와 동일한 CQS 패턴을 그대로 반복.
+- **탈락사유 리포트**: 바로 앞서 사용자가 "탈락 종목이 stage와 함께 기록되는 구조인가" 질문했던 것에 대한 실제 구현 — `history` dict의 5개 stage DataFrame을 순회하며 각 티커가 "마지막으로 등장한 stage"를 찾고, 거기의 `fail_reason`/`na_reasons`를 그 티커의 최종 상태로 기록하는 `build_rejection_report()`를 작성. 2025-09-30 기준 실제 검증: 847개 티커 전원이 정확히 하나의 stage/상태로 분류됨(PASSED 14 + REJECTED 833, stage별 탈락 수 합이 전체와 일치).
+- **디버깅 노트북 검토 결과**: 사용자에게 먼저 내용을 리뷰해 보고 — (1) `02_strategy_pipeline.ipynb`의 stage별 파라미터가 params.yaml과 어긋나 있었음(Stage1 pass_ratio 0.4, Stage5는 지금 코드에 존재하지도 않는 파라미터 키 사용 등, 조용히 기본값으로 대체되는 버그). (2) `03_debugging_and_backtest.ipynb` 10번 셀이 `FinancialHealthScreenerTest`라는 이름으로 Stage5 로직을 통째로 복제해뒀는데, 오늘 세션에서 실제 Stage5를 여러 번 고친 뒤(`FINANCE_SECTOR_CAUTION` 문자열 태그 전환 등)로는 최신 동작과 어긋나 있어 이걸로 디버깅하면 잘못된 결론을 낼 위험이 있음. 사용자가 "삭제하고 새로 만들어도 괜찮다"고 확인.
+- **해결책**: 노트북 3개 삭제. 대신 `debugging/` 폴더에 4개 스크립트 신설 — 로직을 절대 재구현하지 않고 항상 실제 프로덕션 모듈(`stages/`, `core/pipeline.py`, `analysis/screening_stats.py`)을 그대로 호출하도록 설계해 재발 방지:
+  - `smoke_test_loader.py`: loader 단위 스모크 테스트(유니버스/DART파싱/OHLCV/분기차분/rate-limit카운터/공시시차 근사 확인)
+  - `run_single_stage.py`: `--stage N --tickers ...`로 stage 하나만 격리 실행, 항상 params.yaml 실값 사용
+  - `trace_ticker.py`: `--ticker --date` 또는 `--from-latest`(재실행 없이 main.py의 최근 산출물 재사용)로 특정 종목의 탈락 stage/사유 추적, `screening_stats.build_rejection_report()` 재사용
+  - `inspect_raw_dart.py`: DART 원본 계정 테이블 덤프(계정 매핑 디버깅용)
+- **검증**: 4개 스크립트 전부 캐시된 실데이터(2025-09-30 등)로 직접 실행해 정상 동작 확인. `smoke_test_loader.py` 작성 중 자체 버그(공시 시차 근사 계산에서 분기말 날짜가 한 달 밀리는 off-by-one, f-string 중첩 문법 오류)를 발견해 함께 수정.
+- → `stock_screener/main.py`, `analysis/screening_stats.py`(신규), `analysis/visualize_screening.py`(신규), `debugging/`(신규 4개 스크립트) 반영 완료. `01_data_loader_test.ipynb`/`02_strategy_pipeline.ipynb`/`03_debugging_and_backtest.ipynb` 삭제. `architecture.md`(폴더 구조 갱신), `screening_criteria.md`(TODO 종료 처리) 반영 완료.
