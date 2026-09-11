@@ -24,7 +24,12 @@ class QuantPipeline:
         
         # 각 스테이지 초기화 (params.yaml의 해당 블록 주입)
         self.stage1 = NeglectedSectorScreener(params.get('stage1_neglected_sector', {}))
-        self.stage2 = SectorLeaderScreener(params.get('stage2_sector_leaders', {}))
+        # Stage2만 global.profitability_basis(ttm|annual)를 읽는다 — "수익성" 지표(ROE/ROIC)를
+        # 계산하는 유일한 단계라서다(2026-09-11 사용자 논의로 범위 확정, screening_criteria.md
+        # 참고). params.yaml 원본을 변형하지 않도록 사본에 주입한다.
+        stage2_params = dict(params.get('stage2_sector_leaders', {}))
+        stage2_params['profitability_basis'] = params.get('global', {}).get('profitability_basis', 'ttm')
+        self.stage2 = SectorLeaderScreener(stage2_params)
         self.stage3 = FundamentalImproveScreener(params.get('stage3_fundamental_improve', {}))
         self.stage4 = ValuationScreener(params.get('stage4_valuation', {}))
         self.stage5 = FinancialHealthScreener(params.get('stage5_financial_health', {}))

@@ -2,16 +2,56 @@ import os
 import json
 import time
 import logging
+import requests
+from dotenv import load_dotenv
+
+# pykrx는 모듈 임포트 시점에 KRX 인증 세션을 생성하므로(website/comm/webio.py 참고),
+# KRX_ID/KRX_PW를 읽기 전에 pykrx를 먼저 임포트하면 비인증 세션으로 고정되어 이후
+# 모든 조회가 "LOGOUT" 빈 응답을 반환한다 — 반드시 pykrx 임포트보다 먼저 호출해야 한다.
+load_dotenv()
+
 import pandas as pd
 import numpy as np
 from pykrx import stock
 import FinanceDataReader as fdr
 import OpenDartReader
-from dotenv import load_dotenv
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, Dict
 import warnings
+
+_REQUESTS_TIMEOUT_PATCHED = False
+
+def _patch_requests_default_timeout(timeout_seconds: float):
+    """
+    2026-09-11 도입: OpenDartReader/pykrx 둘 다 내부 requests 호출에 timeout을 지정하지
+    않아, 서버가 응답 없이 연결만 유지하면 무기한 멈추는 취약점이 있었다(annual 백테스트
+    검증 중 DART 호출이 7시간+ 무기한 대기한 사고로 실제 발견 — 자세한 경위는
+    decisions_log.md 2026-09-11 항목 참고).
+
+    처음엔 socket.setdefaulttimeout()으로 막으려 했으나, requests(urllib3)는 소켓을 직접
+    만들 때 자체 타임아웃 관리를 하며 호출부가 timeout을 안 주면 명시적으로
+    `timeout=None`(무제한)을 적용한다 — 즉 프로세스 전역 소켓 기본값을 무시한다. 실측으로
+    직접 확인함(블랙홀 IP 대상 커넥트 시도가 소켓 기본 타임아웃 2초를 무시하고 75초 뒤에야
+    OS 레벨 TCP 재전송 타임아웃으로 실패).
+
+    유일하게 실제로 동작하는 방법은 `requests.Session.request` 자체를 몽키패치해, 호출부가
+    timeout을 명시적으로 지정하지 않은 경우에만 기본값을 주입하는 것 — 호출부가 이미
+    timeout을 지정했다면 그 값을 그대로 존중한다(patch가 설정을 덮어쓰지 않음). 로컬에
+    "연결은 받지만 응답은 안 보내는" 서버로 재현 테스트해 정확히 설정한 시간에
+    `ReadTimeout`이 발생함을 확인했다(DART 사고와 동일한 실패 양상).
+    """
+    global _REQUESTS_TIMEOUT_PATCHED
+    if _REQUESTS_TIMEOUT_PATCHED:
+        return
+    original_request = requests.Session.request
+
+    def _request_with_default_timeout(self, method, url, **kwargs):
+        kwargs.setdefault('timeout', timeout_seconds)
+        return original_request(self, method, url, **kwargs)
+
+    requests.Session.request = _request_with_default_timeout
+    _REQUESTS_TIMEOUT_PATCHED = True
 
 class QuantDataLoader:
     def __init__(self, use_cache: bool = True, cache_days: int = 30,
@@ -39,6 +79,14 @@ class QuantDataLoader:
             raise ValueError(f"ttm_denominator는 'latest_snapshot' 또는 'avg_4q'여야 합니다: {ttm_denominator}")
         self.ttm_denominator = ttm_denominator
 
+        # 감사/디버깅용 메타데이터(2026-09-11 도입): parse_standardized_financials가 매번 계산하는
+        # 공시 지연(rcept_dt ~ base_date) 일수를 판정 로직과 완전히 분리된 채널로 기록만 해둔다.
+        # standard_metrics 딕셔너리(ACCOUNT_MAPPING 키만 있어야 하는 계정값 dict)에 섞어 넣으면
+        # get_isolated_quarterly_financials의 분기 차분 로직이 모든 키를 ACCOUNT_MAPPING에서
+        # 조회하다가 KeyError로 죽으므로, 반드시 별도 리스트로 분리한다. 필터링/스코어링에는
+        # 전혀 쓰이지 않고, 사후 감사(예: "이 종목이 공시 직후라 아슬아슬하게 통과했다") 용도로만 쓴다.
+        self.disclosure_lag_log: list = []
+
         # 🚨 수정된 부분: loader.py 파일의 위치(data 폴더)를 기준으로 절대 경로 고정
         base_dir = Path(__file__).resolve().parent
         self.cache_dir = base_dir / "cache"
@@ -62,6 +110,17 @@ class QuantDataLoader:
         # 한 번에 전체 다년치 백테스트가 죽는 원인이 됐음 — endpoints.json에 이미 있던
         # (그러나 지금까지 아무 데서도 읽지 않던) KRX.max_retries를 실제로 배선.
         self.krx_retries = self.endpoints.get("KRX", {}).get("max_retries", 3)
+
+        # endpoints.json의 DART.timeout/KRX.timeout(필드는 있었지만 지금까지 실제로 적용된 적
+        # 없던 장식용 값)을 requests 기본 timeout으로 실제 적용 — DART/KRX 호출부 둘 다(그리고
+        # get_financial_statements의 dart_retries 재시도 루프, _fetch_with_retry 재시도 루프
+        # 둘 다) 보호된다. 지금까지 그 재시도 루프들은 "예외가 실제로 발생해야" 작동했는데,
+        # timeout이 없으면 예외 자체가 안 나고 그냥 멈춰서 재시도 코드에 도달하지 못했다.
+        # 두 timeout 값이 다르면(기본 10s/15s) 더 보수적인(긴) 쪽을 채택 — 짧은 쪽 기준으로
+        # 잡으면 정상적으로 느린 응답까지 오탐 처리될 위험이 있어서다.
+        dart_timeout = self.endpoints.get("DART", {}).get("timeout", 10)
+        krx_timeout = self.endpoints.get("KRX", {}).get("timeout", 15)
+        _patch_requests_default_timeout(max(dart_timeout, krx_timeout))
 
         # config 로드 블록 하단에 추가 (DART API 일일 호출량 관리)
         self.dart_daily_limit = self.endpoints.get("DART", {}).get("daily_limit", 9500)
@@ -547,6 +606,15 @@ class QuantDataLoader:
                 )
                 return standard_metrics
 
+            # 감사/디버깅용 기록(판정에는 영향 없음) — 공시일이 base_date에 얼마나 가까웠는지
+            # (작을수록 "공시 직후 아슬아슬하게 포함/배제"된 경우) 나중에 되짚어볼 수 있도록 남긴다.
+            self.disclosure_lag_log.append({
+                "ticker": ticker, "year": year, "report_code": report_code,
+                "base_date": base_date, "rcept_dt": rcept_dt,
+                "lag_days": (base_date - rcept_dt).days,
+                "accepted": rcept_dt <= base_date,
+            })
+
             if rcept_dt > base_date:
                 self.logger.warning(
                     f"[미래참조 방지] {ticker}의 {year}년 {report_code} 보고서는 "
@@ -761,6 +829,31 @@ class QuantDataLoader:
                 
         self.logger.warning(f"[연간 데이터 불가] {ticker}: {base_date} 기준 최근 3년 내 공시된 사업보고서를 찾지 못했습니다.")
         return annual_metrics
+
+    def get_annual_financials_series(self, ticker: str, base_date: date, n_years: int = 3, search_back_years: int = 6) -> list:
+        """
+        base_date 기준으로 공시가 완료된 최근 n_years개 확정 사업보고서를 최신순으로 반환합니다.
+        (2026-09-11 도입, Stage2 `profitability_basis: "annual"` 옵션용 — 단일 최신 연도만
+        반환하는 get_annual_financials()와 달리 연간 수준+추세를 함께 보기 위한 다개년 시계열)
+
+        get_annual_financials()처럼 첫 유효 연도에서 멈추지 않고, search_back_years년까지
+        거슬러 올라가며 유효한 연도를 n_years개 모을 때까지 계속 수집한다. 신규상장 등으로
+        공시된 연도 자체가 n_years보다 적으면 있는 만큼만 반환한다(길이 < n_years 가능).
+
+        반환값: [(year, {계정명: 값, ...}), ...] — 연도가 각 dict 안에 섞이지 않도록 튜플로
+        분리한다(계정값 dict에 'year' 키를 섞으면, 이 dict를 ACCOUNT_MAPPING 키로 순회하는
+        다른 코드가 있을 경우 KeyError를 유발할 위험이 있음 — PSR 구현 시 겪었던 것과 동일한
+        종류의 위험을 사전에 차단).
+        """
+        results = []
+        target_year = base_date.year
+        for y in range(target_year, target_year - search_back_years, -1):
+            data = self.parse_standardized_financials(ticker, y, '11011', base_date)
+            if not all(pd.isna(v) for v in data.values()):
+                results.append((y, data))
+                if len(results) >= n_years:
+                    break
+        return results
 
     def get_quarterly_op_margin_series(self, ticker: str, base_date: date, n_quarters: int = 8) -> list:
         """

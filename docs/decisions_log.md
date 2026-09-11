@@ -294,3 +294,75 @@
   - `inspect_raw_dart.py`: DART 원본 계정 테이블 덤프(계정 매핑 디버깅용)
 - **검증**: 4개 스크립트 전부 캐시된 실데이터(2025-09-30 등)로 직접 실행해 정상 동작 확인. `smoke_test_loader.py` 작성 중 자체 버그(공시 시차 근사 계산에서 분기말 날짜가 한 달 밀리는 off-by-one, f-string 중첩 문법 오류)를 발견해 함께 수정.
 - → `stock_screener/main.py`, `analysis/screening_stats.py`(신규), `analysis/visualize_screening.py`(신규), `debugging/`(신규 4개 스크립트) 반영 완료. `01_data_loader_test.ipynb`/`02_strategy_pipeline.ipynb`/`03_debugging_and_backtest.ipynb` 삭제. `architecture.md`(폴더 구조 갱신), `screening_criteria.md`(TODO 종료 처리) 반영 완료.
+
+## 2026-09-11
+
+### [결정] 섹터 라벨 point-in-time 대체 데이터 소스 조사 — 채택 가능한 것 없음, 한계 유지
+- **배경**: 백테스트 없이 처리 가능한 TODO 목록 중 우선순위 1번으로 선정. `fdr.StockListing('KRX-DESC')`가 날짜 인자를 지원하지 않아 항상 "오늘 기준" 업종이 모든 과거 데이터에 붙는 기존 한계(2026-09-06 확인)를 해소할 대체 소스가 있는지 pykrx로 조사.
+- **후보 1 (`stock.get_market_sector_classifications(date, market)`, KRX 공식 "업종분류현황")**: `date` 인자가 실제로 point-in-time임을 라이브 호출로 확인(2019-09-30 vs 2025-09-30 매핑이 실제로 다름, 종목 수도 901→958로 상장/폐지 반영). 그러나 KOSPI 전체를 **24~26개 대분류로만** 분류 — 현재 `KRX-DESC` 기준(~126개 세분류)보다 훨씬 거칠다. 실측 결과 방산 5종목(LIG넥스원·풍산·한화에어로스페이스·한화시스템·현대로템)이 "금속"/"운송장비·부품"/"전기·전자"로 뿔뿔이 흩어져, Stage1이 원래 잡아내려는 "니치한 소외 섹터"(예: 방산) 개념 자체가 이 분류 체계에서는 성립하지 않음 — 기술적으로 point-in-time이어도 Stage1의 존재 이유를 훼손하는 트레이드오프라 기각.
+- **후보 2 (KRX 테마/업종 지수 구성종목, `get_index_portfolio_deposit_file`)**: 2014-05-02부터 조회 가능해 point-in-time이나, "KRX K-AI 방산TOP5+" 등 curated TOP-N 지수라 전체 KOSPI 커버리지가 안 되고 대부분의 니치 업종엔 대응하는 테마 지수 자체가 없어 전면 대체재로 쓸 수 없음.
+- **결론**: 무료 소스 중 "point-in-time + 현재 수준의 세분화"를 동시에 만족하는 대체재를 찾지 못함. 유료 소스(FnGuide/WISEfn 등 WICS 히스토리)는 조사 범위 밖으로 보류. 기존 한계를 그대로 유지하기로 결정, 코드 변경 없음.
+- → `screening_criteria.md`(1단계 "알려진 한계" 절에 조사 결과 추가, TODO 종료 처리) 반영 완료.
+
+### [결정] pykrx 인증 세션 버그 발견 및 수정 (위 조사 도중 발견, 별개 이슈)
+- **발견 경위**: 위 조사를 위해 `stock.get_market_cap()` 등 기본 pykrx 호출을 테스트하다가 `"LOGOUT"` 빈 응답으로 전부 실패하는 것을 발견. curl로 KRX API 엔드포인트(`getJsonData.cmd`)를 직접 호출해도 동일하게 `"LOGOUT"`이 나와 pykrx 라이브러리 문제가 아니라 세션 인증 자체가 안 되고 있음을 확인.
+- **근본 원인**: 설치된 pykrx(1.2.8)는 `pykrx/website/comm/webio.py`가 **모듈 임포트 시점**에 `build_krx_session()`으로 KRX_ID/KRX_PW 인증 세션을 생성한다. 그런데 `data/loader.py`는 `from pykrx import stock`이 (구)7번째 줄, `load_dotenv()`는 `QuantDataLoader.__init__` 안(구 19번째 줄)이라 항상 인증 정보 없이 세션이 먼저 만들어졌고, `backtest/run_backtest.py`는 아예 `from pykrx import stock`을 6번째 줄에서 직접 호출하면서 `load_dotenv()` 자체가 없었다. 이 문제는 2026-09-08 항목("실제 백테스트 3차 실행")에서 이미 한 차례 발견됐었지만 그때는 "인증 없이도 기존 기능이 정상 동작해왔던 것으로 보여 급한 이슈 아님"으로 보류됐음 — 그러나 지금 재현 결과 **인증 없이는 아예 동작하지 않는 상태**로 바뀌어 있어(설치된 pykrx 버전이 그 사이 바뀌었거나 KRX 쪽 정책이 강화된 것으로 추정, 원인 자체는 추적하지 않음), 캐시가 없는 새 날짜를 조회하면(오늘 기준 `main.py` 실행, 백테스트 기간 확장 등) 바로 실패하는 상태였다.
+- **해결책**: `.env`를 pykrx 임포트 **전에** 로드하도록 두 파일 모두 임포트 순서를 조정 — `data/loader.py`는 파일 최상단에서 `from dotenv import load_dotenv; load_dotenv()`를 `from pykrx import stock`보다 먼저 실행하도록 이동(기존 `__init__` 안의 `load_dotenv()` 호출은 멱등하므로 그대로 남겨둠). `backtest/run_backtest.py`도 동일한 이유로 `from pykrx import stock` 직전에 `load_dotenv()` 추가.
+- **검증**: 수정 전 `stock.get_market_cap('20190930', market='KOSPI')`가 매번 빈 응답으로 실패함을 먼저 재현 확인. `.env`를 먼저 로드하는 스크립트로는 즉시 정상 인증(`KRX 로그인 완료`)되고 데이터도 정상 수신(901개 행)됨을 확인. 수정 후에는 `data.loader`를 먼저 임포트한 뒤 pykrx를 호출하는 실제 프로덕션 임포트 순서를 그대로 재현해 정상 동작함을 재확인.
+- → `data/loader.py`, `backtest/run_backtest.py` 반영 완료. `architecture.md`/`screening_criteria.md`는 이 항목이 설계가 아닌 임포트 순서 버그 수정이라 갱신 대상 아님(결정 로그로 충분).
+
+### [결정] 재무 데이터 발표 시점 지연(lag) 추적 필드 신설 — 감사/디버깅 전용 메타데이터로 한정
+- **배경**: TODO 2번 항목 착수. 문구가 "현재는 섹터-종목 간 lag만 `sector_data_lag_days`로 추적"이라 언급했으나 전수 grep 결과 이 필드는 코드 어디에도 존재한 적이 없는 문서 오기임을 확인(과거 `.cache`/`cache` 표기 혼재 사례와 유사한 종류의 문서-코드 불일치). 또한 TODO 자체가 "이 필드로 뭘 하려는 것인지"를 명시하지 않아 설계 방향(실제 필터링 신호로 쓸지 vs 순수 감사용 메타데이터로만 남길지)을 사용자에게 확인 — 감사/디버깅용 메타데이터로 결정(판정 로직에 영향 없이 기록만).
+- **설계**: `parse_standardized_financials`가 `rcept_dt`(실제 공시일)를 계산할 때, 이 값을 반환용 `standard_metrics` 딕셔너리(ACCOUNT_MAPPING 키만 담는 계정값 dict)에 섞지 않고 별도의 `QuantDataLoader.disclosure_lag_log`(인스턴스 리스트)에 `{ticker, year, report_code, base_date, rcept_dt, lag_days=(base_date-rcept_dt).days, accepted}`로 append만 하도록 구현. `standard_metrics`에 섞었다면 `get_isolated_quarterly_financials`의 분기 차분 로직이 `self.ACCOUNT_MAPPING[k]`로 모든 키를 조회하다가 새 키에서 `KeyError`가 났을 것 — 판정 경로와 완전히 분리된 채널을 쓴 이유.
+- **검증**: 삼성전자(005930) 샘플로 `parse_standardized_financials` 및 `get_isolated_quarterly_financials`를 직접 호출해 (1) `disclosure_lag_log`에 `lag_days=110`(공시일 2024-03-12, base_date 2024-06-30) 기록이 정상 추가되고, (2) 분기 차분 계산이 `KeyError` 없이 기존과 동일하게 동작함을 확인.
+- **참고**: 메모리 내 리스트로만 존재하며 디스크에 자동 저장되지 않음 — `debugging/` 폴더 스크립트들과 같은 패턴으로, 필요 시 사용자가 직접 `loader.disclosure_lag_log`를 덤프해 쓰는 용도. 자동 CSV 저장 등은 요청 범위 밖이라 추가하지 않음.
+- → `data/loader.py`(`disclosure_lag_log` 필드 신설) 반영 완료. `screening_criteria.md`(TODO 종료 처리, `sector_data_lag_days` 오기 정정) 반영 완료.
+
+### [결정] `psr`(시가총액/TTM매출) 계산 로직 구현 — TODO의 "Stage5급 공수" 추정은 틀렸음을 확인
+- **배경**: TODO 3번 착수. 문구가 "별도 DART 매출 조회 루프 필요(Stage5급 공수)"라고 추정했으나, 실제로 Stage3(`stages/stage3_fundamental_improve.py:48`)가 이미 `loader.get_quarterly_financials_series(ticker, base_date, n_quarters=lookback_q)`로 Stage4 후보 전원에 대해 매출을 포함한 분기별 재무제표를 조회하고 있음을 코드 확인. `get_financial_statements`가 (ticker, year, report_code, fs_div) 단위로 `dart_cache_days`(3650일) 캐싱을 하므로, Stage4가 뒤이어 TTM 매출을 다시 조회해도 대부분 캐시 히트일 것으로 판단 — 실제로는 훨씬 작은 공수임을 사전에 파악하고 착수.
+- **구현**: `core/schema.py`의 `ValuationMetrics`에 `psr: Optional[float] = None` 필드 추가(2026-09-01에 `per`과 함께 제외됐던 필드를 재도입). `stages/stage4_valuation.py`에서 Stage4 후보 티커별로 `loader.get_ttm_financials(ticker, base_date)['revenue']`를 조회해 `psr = market_cap / ttm_revenue`로 계산(매출 결측·0 이하는 NaN 처리). `per`과 동일하게 값만 보존하고 composite score 계산에는 반영하지 않음(반영 여부는 `per`과 함께 별도 TODO로 남겨둠, 백테스트 검증 필요).
+- **검증**: 2025-09-30 기준 실제 파이프라인을 Stage4까지 실행 — (1) Stage4 56개 종목(기존 퍼널 150→56과 일치) 전원 `psr` 계산 성공(결측 0건, 분포 median 0.42x·max 1267x로 상식적 범위), (2) `dart_call_state.json`이 이번 실행 전후로 전혀 갱신되지 않아 **신규 DART API 호출 0건**임을 확인 — Stage3가 예열해둔 캐시만으로 전부 충당됨. 사전 예상대로 "Stage5급 공수"가 아니라 스키마/스테이지 코드 수십 줄 추가로 끝남.
+- → `core/schema.py`(`ValuationMetrics.psr` 신규), `stages/stage4_valuation.py` 반영 완료. `screening_criteria.md`(TODO 종료 처리, Stage4 스키마 매핑 절 갱신) 반영 완료.
+
+### [보류] `global.profitability_basis`의 `"annual"` 경로 배선 — 범위 확정 안 돼 다음 세션으로 이관
+- **배경**: TODO 4번 착수. 코드 확인 결과 `profitability_basis`는 어디서도 읽히지 않는 완전한 장식용 설정(params.yaml 주석에만 "ttm만 구현됨"이라 적혀 있음)이고, 대체 후보인 `get_annual_financials()`(최근 확정 사업보고서 기준)는 구현만 돼 있고 호출자가 전혀 없는 죽은 코드임을 확인.
+- **막힌 지점**: `get_ttm_financials()`를 쓰는 곳이 Stage2(ROE/ROIC/OPM, "수익성" 이름과 직접 일치)·Stage3(현금흐름 구제용, 현재 비활성)·Stage4(PSR, 방금 신설)·Stage5(ICR/부채비율, "재무건전성"이지 "수익성"은 아님) 4곳이라, `profitability_basis`라는 이름값에 맞춰 Stage2만 전환할지 4곳 전부(global 설정 취지에 더 부합하나 이름과는 어긋남) 전환할지 범위가 불분명 — 사용자에게 확인한 결과 지금은 범위 결정을 보류하고 다음으로 미루기로 함.
+- → 코드 변경 없음. 다음 세션에서 범위 재논의 필요(TODO 유지).
+
+### [보류] Stage5 부채비율 업종 상대기준 구체화 — 기존 설계(Pool 평가)와의 충돌 확인, 보류
+- **배경**: TODO 5번 착수. 현재 금융업 종목(`FINANCE_SECTOR_CAUTION`)은 `stage5_score` 계산 시 부채비율 요소를 아예 빼고 ICR 점수만 사용([stage5_financial_health.py:103-104](../stock_screener/stages/stage5_financial_health.py#L103-L104)) — "업종 상대기준으로 대체"가 아니라 "배제"임을 코드로 확인.
+- **막힌 지점**: TODO가 제안하는 "업종 중위값 대비 몇 %" 방식을 그대로 구현하려면 섹터별 표본이 필요한데, 2026-08-04 결정(Stage5는 생존자가 섹터당 N=1 수준이라 섹터 상대평가가 통계적으로 무의미해 전체 생존자를 하나의 풀로 묶어 평가하도록 의도적으로 설계됨)과 정면으로 충돌한다 — Stage5 생존자만으로 업종 중위값을 내면 동일한 N=1 문제가 재현된다. 실질적으로 쓰려면 Stage5 생존자가 아니라 Stage1 유니버스 전체의 금융업 종목처럼 훨씬 넓은 모집단에서 업종 중위 부채비율을 별도 계산해 벤치마크로 삼아야 하는데, 이는 DART 추가 조회가 필요한 중간 규모 작업 — 사용자에게 확인한 결과 지금은 진행하지 않고 보류.
+- **참고**: 현재 방식(금융업은 ICR 단독 점수)도 딱히 버그는 아니고 나름 합리적인 임시 설계라는 점을 공유하고 보류에 합의함.
+- → 코드 변경 없음. TODO 유지, 다음 세션에서 재논의 필요.
+
+### [결정] `global.profitability_basis: "annual"` 경로 구현 — 위 보류 항목을 논의 끝에 재개, 범위는 Stage2 한정
+- **배경**: 바로 위 보류 항목을 사용자와 다시 논의. 사용자 철학: "턴어라운드는 보통 장기간 기반을 다진 뒤 올라간다"는 관점에서 TTM보다 연간 확정치가 백테스트 철학에 더 맞고, "최근 1~3개년 연간 지표를 모아 추세로 보는" 방식을 원함(사용자가 명시적으로 확인: 단일 최신 연도가 아니라 다년치 추세).
+- **범위 확정**: `get_ttm_financials`를 쓰는 4개 스테이지(2/3/4/5) 중 "수익성(profitability)"이라는 이름에 정확히 대응하는 건 Stage2(ROE/ROIC/OPM)뿐이라 Stage2로 한정. Stage3(분기 YoY 턴어라운드 감지)는 그대로 유지하기로 함 — 오히려 "Stage2=연간 기준 장기 기반 확인, Stage3=분기 단위 최근 가속/반전 포착"이라는 상호보완 역할 분담으로 자연스럽게 해석됨(사용자가 이 프레이밍에 동의).
+- **설계 원칙 충돌 여부 사전 검토**: 사용자가 "기존 설계 원칙(Stage2의 3개 지표 독립 percentile 게이트, 합산 스코어 아님)을 고수하다 로직이 복잡해지거나 더 나은 방법을 놓치면 알려달라"고 명시적으로 요청 — 검토 결과 **원칙 수정 불필요**로 결론. 근거: "ROE/ROIC 값을 어떻게 계산하는가"(TTM vs 연간 수준+추세)와 "여러 지표를 어떻게 결합하는가"(독립 게이트 vs 합산 스코어)는 서로 독립적인 축이라, 전자만 바꾸고 후자(Stage2의 기존 AND 게이트 구조)는 전혀 건드리지 않아도 됨. 오히려 레벨(예: ROE 15%)과 추세(예: 3개년 +5%p)가 같은 단위(ROE 퍼센트)라 Stage3/4/5의 z-score 합산 패턴보다 단순한 가중평균으로 충분해, 구현 비용도 더 낮았음.
+- **점수화 방식**: "수준만" vs "추세만" vs "수준+추세 혼합" 3안을 제시, 사용자가 혼합을 선택 — 추세만 쓰면 이미 우량한 안정주(추세는 평평해도 수준이 높음)가 불이익을 받는 문제를 사용자가 직접 지적하며 혼합을 선호함.
+- **구현**:
+  1. `data/loader.py`에 `get_annual_financials_series(ticker, base_date, n_years=3, search_back_years=6)` 신설 — 기존 `get_annual_financials()`(첫 유효 연도에서 멈춤)와 달리 유효한 연도를 n_years개 모을 때까지 계속 탐색, `[(연도, 계정값dict), ...]` 최신순 리스트 반환. 연도를 계정값 dict에 섞지 않고 튜플로 분리한 이유는 PSR 구현 때 겪었던 것과 같은 종류의 위험(알 수 없는 키가 `ACCOUNT_MAPPING` 순회 코드에서 `KeyError` 유발) 사전 차단.
+  2. `stages/stage2_sector_leaders.py`: 기존 인라인 ROE/ROIC 계산을 `_compute_roe_roic(data)` 헬퍼로 추출(TTM/연간 어느 쪽이든 재사용, 수식 자체는 변경 없음 — 순수 리팩터). `_compute_annual_blended_roe_roic(annual_series)` 신규 — 최근년도 값(수준)과 (최근년도-최고년도) 변화량(추세)을 `annual_level_weight`/`annual_trend_weight`(각 0.5)로 가중합산. 연도가 1개뿐이면 추세 생략(수준값만), 0개면 NaN → 기존 `ROIC_NOT_COMPUTABLE` 등 결측 처리 경로로 자연 흡수.
+  3. `core/pipeline.py`: Stage2만 `global.profitability_basis`를 읽도록 `stage2_params` 사본에 주입(다른 스테이지는 변경 없음, params.yaml 원본은 불변).
+  4. `config/params.yaml`: `global.profitability_basis` 주석을 "구현 완료"로 갱신(기본값은 `"ttm"` 그대로 유지 — 백테스트 검증 전까지 기존 동작 보존). `stage2_sector_leaders`에 `annual_trend_lookback_years`(3)/`annual_level_weight`(0.5)/`annual_trend_weight`(0.5) 신규(하드코딩 금지 원칙에 따라 모두 명시적 값으로 등록, TTM 대비 미검증 초기값임을 주석에 명시).
+- **검증**: 2025-09-30 기준 실제 캐시로 3개 종목(005930, 000660, 019180) 샘플 테스트 — (1) `get_annual_financials_series`가 2025년(미공시)을 정확히 건너뛰고 2024/2023/2022년을 반환, (2) `profitability_basis="ttm"` vs `"annual"`로 각각 `SectorLeaderScreener.run()`을 돌려 값이 뚜렷하게 다르게 계산됨을 확인(예: 005930 TTM ROE 7.8% vs 연간블렌딩 0.7% — 반도체 업황 사이클상 2023년 부진이 반영된 것으로 합리적), (3) 지주/기타금융 종목(005810)으로 `ROIC_NOT_COMPUTABLE` 예외 경로가 두 basis 모두에서 정상 작동함을 확인. 크래시·NaN 오염 없음.
+- **참고**: 기본값은 아직 `"ttm"` — `"annual"`을 실제로 채택할지, 가중치(0.5/0.5)를 어떻게 튜닝할지는 별도 백테스트 A/B 검증이 필요(TODO로 이관, DART 호출량이 유의미해 실행 전 사용자 확인 필요).
+- → `data/loader.py`(`get_annual_financials_series` 신규), `stages/stage2_sector_leaders.py`(`_compute_roe_roic`/`_compute_annual_blended_roe_roic` 신규, `run()` 분기 추가), `core/pipeline.py`(Stage2 params 주입), `config/params.yaml`(`annual_trend_lookback_years`/`annual_level_weight`/`annual_trend_weight` 신규) 반영 완료. `screening_criteria.md`(2단계 절 갱신, TODO 종료+후속 TODO 추가) 반영 완료.
+
+### [발견, 미수정] `annual` 백테스트 A/B 검증 첫 시도 중 DART 호출부 무한 행(hang) 버그 발견
+- **경과**: 위에서 구현한 `profitability_basis: "annual"`을 실제로 검증하려고 `config/params.yaml`을 일시적으로 `"annual"`로 바꾼 뒤 전체 27개 분기 백테스트를 백그라운드로 실행(설정은 `run_backtest.py`가 시작 시 한 번만 읽으므로 실행 직후 파일은 다시 `"ttm"`으로 원복 — 이 부분은 안전하게 처리됨, git diff 확인). DART 호출 0건에서 시작(9,500회 전부 가용).
+- **증상**: 사용자가 "결과가 안 나온다"고 문의한 시점에 확인해보니, 프로세스가 **7시간 34분** 실행됐는데도 DART 호출 카운터가 1169에서 30초 이상 전혀 움직이지 않고, CPU 시간도 10분 2초에서 정지, 로그도 더 안 쌓임 — 죽지는 않았지만 진행이 멈춘 상태.
+- **원인 확정**: macOS `sample` 명령으로 프로세스 스택을 직접 떠본 결과, 메인 스레드가 `_ssl__SSLSocket_read` → 커널 `read()`에서 블록되어 있었음(정확한 콜스택 확보). 이어서 `OpenDartReader` 패키지 소스(`dart_finstate.py` 등)를 grep한 결과, 이 프로젝트가 재무제표 조회에 쓰는 `requests.get(url, params=params)` 호출부 어디에도 `timeout=`이 지정되어 있지 않음을 확인 — DART 서버가 응답 없이 연결만 유지하면 영원히 대기하는 구조. 2026-09-06에 pykrx 호출부는 `_fetch_with_retry`(재시도+참고: 타임아웃은 requests 기본 동작에 의존)로 순단 대응을 이미 해뒀는데, DART 호출부(`loader.py`가 `self.dart.finstate_all()` 등을 부르는 지점)는 같은 보호장치가 없었음 — 지금까지는 각 백테스트가 캐시 재사용 위주로 짧게 끝나 이 구멍이 드러난 적이 없었으나, `annual` 모드가 훨씬 많고 오래 DART를 호출하면서 처음으로 실제 발현됨.
+- **조치**: 사용자 요청으로 백테스트 재실행은 보류. 멈춘 프로세스(pid 2581)는 `kill`로 종료. `config/params.yaml`은 이미 `"ttm"`으로 원복된 상태 확인.
+- **후속 필요 작업**: ~~`data/loader.py`의 DART 호출부(`OpenDartReader` 사용 지점)에 pykrx의 `_fetch_with_retry`와 동일한 취지로 타임아웃+재시도 래퍼 도입 필요~~ → 같은 세션에서 바로 수정 완료, 아래 항목 참고.
+- → 코드 변경 없음(진단만 완료). 수정은 바로 아래 항목에서 이어서 진행.
+
+### [결정] DART/KRX 호출부 무한 행(hang) 버그 수정 완료 — `socket.setdefaulttimeout`은 효과 없음을 실측으로 확인, `requests.Session.request` 몽키패치로 해결
+- **배경**: 바로 위에서 진단한 무한 행 버그를 백테스트 없이 바로 고칠 수 있는지 사용자가 문의 — 가능하다고 판단해 즉시 착수(네트워크 타임아웃 재현은 로컬 소켓 테스트만으로 충분히 검증 가능, DART/KRX 실호출은 정상 동작 스모크 테스트 수준만 필요).
+- **1차 시도(실패, 실측으로 확인)**: `endpoints.json`에 이미 있던 `DART.timeout`(10s)/`KRX.timeout`(15s)을 `socket.setdefaulttimeout(max(10,15))`로 적용하려 했으나, 블랙홀 IP(TEST-NET-1, `192.0.2.1`)에 짧은 타임아웃(2초)을 걸고 실측한 결과 소켓 전역 기본값이 전혀 반영되지 않고 75초 뒤에야 OS 레벨 TCP 재전송 타임아웃으로 실패함을 확인 — `requests`(내부적으로 `urllib3` 사용)는 호출부가 `timeout`을 명시하지 않으면 자체적으로 `timeout=None`(무제한)을 적용하며, `socket.setdefaulttimeout()` 같은 프로세스 전역 설정을 아예 무시하는 라이브러리 동작임을 재확인(파이썬 표준 문서의 통념과 달리 `requests`엔 안 먹힘).
+- **2차 시도(성공)**: `requests.Session.request`를 몽키패치해, 호출부(OpenDartReader/pykrx)가 `timeout`을 명시적으로 안 준 경우에만 `kwargs.setdefault('timeout', ...)`로 기본값을 주입하도록 변경. 로컬에 "연결은 수락하지만 응답은 절대 안 보내는" TCP 서버를 띄워(실제 DART 사고를 그대로 재현) 테스트한 결과, 패치 적용 전엔 무한 대기하던 것이 패치 후엔 정확히 설정한 시간(15초)에 `ReadTimeout`이 발생함을 확인 — 커넥트 단계뿐 아니라 실제 사고 원인이었던 read 단계 행(hang)도 정확히 막힘.
+- **구현**: `data/loader.py`에 모듈 레벨 함수 `_patch_requests_default_timeout(timeout_seconds)` 신설(중복 패치 방지용 모듈 플래그 포함). `QuantDataLoader.__init__`에서 기존 `dart_timeout`/`krx_timeout` 값(현재도 `max(10,15)=15초` 그대로 유지)을 계산해 이 함수를 호출하도록 교체 — `endpoints.json` 값 자체는 이미 있었으니 변경 없음, 실제로 적용되게만 배선.
+- **부수 효과(설계 의도)**: 이 패치는 DART뿐 아니라 pykrx 호출(`_fetch_with_retry`가 감싸는 모든 지점)에도 동일하게 적용된다 — pykrx의 `session.get/post` 역시 timeout을 지정하지 않고 있어 원래는 동일한 무한 행 위험이 잠재해 있었는데(지금까지 우연히 발현되지 않았을 뿐), 이번 수정으로 함께 방어됨. `get_financial_statements`의 기존 `dart_retries` 재시도 루프, `_fetch_with_retry`의 재시도 루프 둘 다 "예외가 실제로 발생해야" 작동하는 구조였는데, 지금까지 timeout이 없어 예외 자체가 안 나서 이 재시도 코드에 도달하지 못했던 것 — 이번 수정으로 그 재시도 로직들이 비로소 의도대로 작동하게 됨.
+- **검증**: (1) 로컬 hang 서버 재현 테스트로 정확히 15.0초에 `ReadTimeout` 발생 확인. (2) `debugging/smoke_test_loader.py` 전체 6개 검증(유니버스/DART 파싱/OHLCV/분기 차분/DART 호출 카운터/공시 시차) 전부 정상 통과 — 실제 캐시된 DART/pykrx 호출이 타임아웃 없이 정상 속도로 동작함을 확인, 회귀 없음.
+- **참고**: `annual` 백테스트 A/B 검증은 이 수정 덕분에 이제 재시도 가능한 상태. 다만 실행 자체는 사용자가 별도로 다시 요청할 때 진행하기로 함(DART 호출량이 유의미해 실행 전 확인 필요 원칙 유지).
+- → `data/loader.py`(`_patch_requests_default_timeout` 신규, `__init__`에서 `socket.setdefaulttimeout` 대신 이 함수 호출) 반영 완료. `screening_criteria.md`(TODO 종료 처리) 반영 완료.

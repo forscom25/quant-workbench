@@ -70,6 +70,23 @@ class ValuationScreener:
             np.nan
         )
 
+        # 2-1. PSR(시가총액/TTM매출) 계산 — per과 동일하게 값만 보존, composite score 미반영.
+        # TTM 매출은 pykrx가 아닌 DART 원본이 출처라 loader.get_ttm_financials()로 별도 조회한다.
+        # Stage3가 이 단계 후보들에 대해 이미 동일 (ticker, base_date)로 분기별 재무제표를
+        # 조회해둔 상태라(get_quarterly_financials_series), DART 원본 캐시(dart_cache_days=3650)가
+        # 대부분 예열되어 있어 신규 API 호출 없이 캐시에서 바로 계산됨.
+        ttm_revenue = {
+            ticker: loader.get_ttm_financials(ticker, base_date).get('revenue', np.nan)
+            for ticker in df['ticker']
+        }
+        df['_ttm_revenue'] = df['ticker'].map(ttm_revenue)
+        df[ValuationCols.psr] = np.where(
+            pd.notna(df['_ttm_revenue']) & (df['_ttm_revenue'] > 0) & pd.notna(df['market_cap']),
+            df['market_cap'] / df['_ttm_revenue'],
+            np.nan
+        )
+        df.drop(columns=['_ttm_revenue'], inplace=True)
+
         # ---------------------------------------------------------
         # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------

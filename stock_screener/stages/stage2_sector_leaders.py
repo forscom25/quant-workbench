@@ -21,7 +21,62 @@ class SectorLeaderScreener:
         self.op_margin_min_quarters = params.get('op_margin_min_quarters', 4)
         self.effective_tax_rate = params.get('effective_tax_rate', 0.22)
 
+        # 2026-09-11 도입: ROE/ROIC를 TTM 단일값이 아니라 연간 확정치의 "수준+추세" 블렌딩으로
+        # 계산할지 여부(pipeline.py가 global.profitability_basis를 이 dict에 주입해 전달).
+        # "ttm"(기본값)이면 기존 동작과 완전히 동일 — 이 값이 Stage2 필터링 로직을 바꾸는
+        # 유일한 지점이며, 나머지 단계(Stage3/4/5)는 이 설정과 무관하게 항상 TTM을 쓴다.
+        self.profitability_basis = params.get('profitability_basis', 'ttm')
+        self.annual_trend_lookback_years = params.get('annual_trend_lookback_years', 3)
+        self.annual_level_weight = params.get('annual_level_weight', 0.5)
+        self.annual_trend_weight = params.get('annual_trend_weight', 0.5)
+
         self.logger = logging.getLogger(__name__)
+
+    def _compute_roe_roic(self, data: dict) -> tuple:
+        """단일 시점(TTM 또는 특정 연도) 원자료에서 ROE/ROIC와 ROIC 분모를 계산한다."""
+        roe = np.divide(data.get('net_income', np.nan), data.get('total_equity', np.nan))
+
+        roic_num = data.get('operating_income', np.nan) * (1 - self.effective_tax_rate)
+        # 투하자본 = 이자부 차입금(total_borrowings) + 자기자본(total_equity).
+        total_borrowings = data.get('total_borrowings', np.nan)
+        total_borrowings = 0.0 if pd.isna(total_borrowings) else total_borrowings
+        roic_den = total_borrowings + data.get('total_equity', np.nan)
+        roic = np.divide(roic_num, roic_den)
+
+        return roe, roic, roic_den
+
+    def _compute_annual_blended_roe_roic(self, annual_series: list) -> tuple:
+        """
+        연간 확정치 시계열(최신순)로부터 ROE/ROIC를 "수준(최근년도 값) + 추세(최근년도-최고년도
+        변화량)"의 가중합산으로 계산한다. 레벨과 추세 모두 같은 단위(ROE/ROIC 비율)라 z-score
+        없이 바로 가중평균한다 — 이미 우량한 안정주(추세는 평평해도 수준이 높음)와 턴어라운드주
+        (수준은 낮아도 추세가 가파름)를 둘 다 반영하기 위한 설계(2026-09-11 사용자 논의 결론).
+        연간 데이터가 1개년치만 있으면(신규상장 등) 추세를 계산할 수 없으므로 수준값만 사용하고,
+        0개년치면(공시 자체를 못 찾음) ROIC_NOT_COMPUTABLE 등 기존 결측 처리 경로로 자연히 흡수된다.
+        """
+        if not annual_series:
+            return np.nan, np.nan, np.nan
+
+        # annual_series는 최신순([(연도, dict), ...]) — [0]이 가장 최근 확정 연도
+        roe_latest, roic_latest, roic_den_latest = self._compute_roe_roic(annual_series[0][1])
+
+        if len(annual_series) < 2:
+            return roe_latest, roic_latest, roic_den_latest
+
+        roe_oldest, roic_oldest, _ = self._compute_roe_roic(annual_series[-1][1])
+
+        roe_trend = roe_latest - roe_oldest if pd.notna(roe_latest) and pd.notna(roe_oldest) else np.nan
+        roic_trend = roic_latest - roic_oldest if pd.notna(roic_latest) and pd.notna(roic_oldest) else np.nan
+
+        roe_blended = (
+            self.annual_level_weight * roe_latest + self.annual_trend_weight * roe_trend
+            if pd.notna(roe_latest) and pd.notna(roe_trend) else roe_latest
+        )
+        roic_blended = (
+            self.annual_level_weight * roic_latest + self.annual_trend_weight * roic_trend
+            if pd.notna(roic_latest) and pd.notna(roic_trend) else roic_latest
+        )
+        return roe_blended, roic_blended, roic_den_latest
 
     # [수정] run 메서드 시그니처 변경 (미리 계산된 df 대신 loader를 직접 받음)
     def run(self, sector_tickers_df: pd.DataFrame, loader, base_date) -> pd.DataFrame:
@@ -37,21 +92,20 @@ class SectorLeaderScreener:
             sector = row['sector']
             
             # Loader에게 원자료(Atomic Data) 요청
-            raw_ttm = loader.get_ttm_financials(ticker, base_date)
+            # ROE/ROIC 계산 기준: "ttm"(기본값)이면 분자(흐름)-분모(스냅샷) 조합을 TTM 단일
+            # 시점으로 계산(과거 동작과 동일), "annual"이면 최근 N개년 확정 사업보고서의
+            # 수준+추세 블렌딩으로 계산(2026-09-11 도입, ROIC 분모 계산식 자체는 두 경로가 동일).
+            if self.profitability_basis == "annual":
+                annual_series = loader.get_annual_financials_series(
+                    ticker, base_date, n_years=self.annual_trend_lookback_years
+                )
+                roe, roic, roic_den = self._compute_annual_blended_roe_roic(annual_series)
+            else:
+                raw_ttm = loader.get_ttm_financials(ticker, base_date)
+                roe, roic, roic_den = self._compute_roe_roic(raw_ttm)
+
             op_margin_series = loader.get_quarterly_op_margin_series(ticker, base_date, n_quarters=self.op_margin_lookback_q)
-            
-            # 비율 계산 (ROE, ROIC) - ZeroDivisionError 등을 막기 위해 np.divide 사용
-            roe = np.divide(raw_ttm.get('net_income', np.nan), raw_ttm.get('total_equity', np.nan))
-            
-            roic_num = raw_ttm.get('operating_income', np.nan) * (1 - self.effective_tax_rate)
-            # 투하자본 = 이자부 차입금(total_borrowings) + 자기자본(total_equity).
-            # (과거 total_assets - total_liabilities로 계산했으나 이는 회계항등식상 자기자본과
-            # 동일해 실질적으로 ROIC가 아닌 ROE의 변형이었음 — data/cache 실데이터로 확인 후 수정)
-            total_borrowings = raw_ttm.get('total_borrowings', np.nan)
-            total_borrowings = 0.0 if pd.isna(total_borrowings) else total_borrowings
-            roic_den = total_borrowings + raw_ttm.get('total_equity', np.nan)
-            roic = np.divide(roic_num, roic_den)
-            
+
             # 영업이익률 변동성(표준편차) 계산 (utils 활용)
             op_std, op_std_status = compute_std(op_margin_series, min_valid_points=self.op_margin_min_quarters)
             

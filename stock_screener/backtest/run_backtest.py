@@ -3,6 +3,12 @@ import argparse
 import yaml
 import pandas as pd
 import time
+from dotenv import load_dotenv
+
+# data/loader.py와 동일한 이유로, pykrx 임포트보다 반드시 먼저 호출해야 한다
+# (pykrx가 모듈 임포트 시점에 KRX_ID/KRX_PW로 인증 세션을 생성하기 때문).
+load_dotenv()
+
 from pykrx import stock
 from datetime import date, datetime
 from pathlib import Path

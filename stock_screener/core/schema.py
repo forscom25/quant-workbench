@@ -77,6 +77,11 @@ class ValuationMetrics:
     stage4_score: float
     is_pbr_value_trap: bool
     na_reasons: str = ""
+    # 2026-09-11 도입: PSR(시가총액/TTM매출). per과 동일하게 값만 보존하고 composite score
+    # 계산에는 아직 반영하지 않는다(반영 여부는 백테스트 검증 후 별도 결정 — screening_criteria.md
+    # TODO 참고). per(pykrx 제공값)과 달리 DART TTM 매출을 loader.get_ttm_financials()로
+    # 직접 조회해 계산한다.
+    psr: Optional[float] = None
 
 @dataclass
 class FinancialHealthMetrics:
