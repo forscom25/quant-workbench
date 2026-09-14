@@ -28,5 +28,12 @@ __pycache__/
 **/data/.cache/
 **/data/cache/
 
+# OpenDartReader 라이브러리 자체 캐시(기업 코드 마스터 리스트, 이 프로젝트 코드가 만드는 게
+# 아니라 OpenDartReader 패키지가 실행 시 작업 디렉터리 기준으로 생성) — 파일명에 날짜가 박혀
+# 매일 새로 생기고 예전 파일은 고아가 되는데, 실행 위치에 따라 여러 경로(repo 루트,
+# stock_screener/, stock_screener/backtest/ 등)에 흩어져 생겨 매번 diff 노이즈를 만들었음
+# (2026-09-14 발견, data/cache와 동일한 종류의 문제).
+**/docs_cache/
+
 # 백테스트 결과 및 차트 산출물 (Git 추적 제외)
 outputs/
