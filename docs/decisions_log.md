@@ -386,3 +386,28 @@
 - **원인 추정(데이터로 뒷받침)**: `portfolio_log` 비교 결과 annual 모드가 분기당 평균 14.9개 종목을 통과시켜 ttm(12.0개)보다 더 느슨한 게이트로 작동함을 확인. 확정 사업보고서는 회계연도 마감 후 3개월 뒤에야 공시되므로(예: FY2023 보고서는 2024년 3월경 공시, 다음 FY2024 보고서 전까지 계속 참조) 최근 분기 기준으로는 최대 ~21개월 묵은 데이터로 "지금 우량한지"를 판단하게 되어, 그 사이 실적이 실제로 꺾인 종목까지 통과시키는 것으로 해석. "장기 기반을 확인하면 더 안정적일 것"이라는 최초 가설과 반대로 MDD까지 악화된 것이 이 해석과 부합 — 분기 노이즈 감소라는 의도한 효과보다 데이터 시의성 손실이라는 비용이 더 컸던 것으로 결론.
 - **최종 결정**: `global.profitability_basis` 기본값 `"ttm"` 유지 확정(변경 없음, 이미 그 값이었음). `"annual"` 관련 코드(`get_annual_financials_series`, `_compute_annual_blended_roe_roic`, `annual_*` 파라미터)는 삭제하지 않고 보존 — `cash_flow_rescue`와 동일한 패턴(향후 가중치를 다르게 재설계해 재시도할 수 있도록). 사용자가 이번 세션은 여기까지 진행하기로 결정, 가중치 재튜닝 등 추가 시도는 보류.
 - → 코드 변경 없음(검증 결과만 기록). `screening_criteria.md`(2단계 절 결론 반영, TODO 종료 처리) 반영 완료.
+
+## 2026-09-14
+
+### [결정] `global.ttm_denominator: "avg_4q"` vs `"latest_snapshot"` A/B 백테스트 — avg_4q도 열세로 확인, `"latest_snapshot"` 기본값 최종 확정
+- **배경**: "지금 데이터셋으로 할 수 있는 TODO" 목록 중 사용자가 이 항목을 1순위로 선택. `annual` vs `ttm` 검증과 동일한 절차(params.yaml 값만 일시적으로 바꿔 27개 분기 전체 실행 → 프로세스 시작 확인 후 즉시 원복 → 완료 후 비교)로 진행. `ttm_denominator`는 이미 `run_backtest.py`/`cache_warmup.py`/`main.py`에 배선이 끝나 있어(2026-09-06) 코드 변경 없이 바로 실행 가능했음.
+- **비교 기준선**: `profitability_basis` 검증 때와 동일한 `performance_log_20260909_122525.csv`(latest_snapshot, 누적 54.3%)를 재사용 — 그 사이 변경들이 이 경로에 영향 없음은 이미 검증됨.
+- **결과**:
+
+| 지표 | latest_snapshot(기본값) | avg_4q |
+|---|---|---|
+| 누적수익률 | 54.3% | **29.9%** |
+| CAGR | 6.6% | 4.0% |
+| MDD | -25.1% | **-26.4%**(더 나쁨) |
+| Sharpe | 0.32 | 0.19 |
+| 벤치마크 대비 승률 | 37.0% | 29.6% |
+
+- **원인 추정**: `portfolio_log` 비교 결과 avg_4q가 분기당 평균 12.9개 종목을 통과시켜 latest_snapshot(12.0개)보다 소폭 더 느슨함을 확인 — `annual` 검증 때와 같은 방향(정도는 더 작음). ROE/ROIC 분모(자산·자기자본 등 BS 계정)를 4개 분기 평균으로 스무딩하면, 특정 분기에 급격한 자본 변동(대규모 감액손실, 자본잠식 진행 등)이 있었던 종목의 경고 신호가 희석되어 더 늦게(혹은 덜 강하게) 걸러지는 것으로 해석. `avg_4q` 도입 취지(자사주매입·유상증자 등으로 인한 분모 급변 시 외란 완화)는 유효한 경우도 있겠으나, 백테스트 전체로 보면 "위험 신호를 스무딩해서 놓치는 비용"이 "정상적 외란을 완화하는 효익"보다 컸다는 결론.
+- **최종 결정**: `global.ttm_denominator` 기본값 `"latest_snapshot"` 유지 확정(변경 없음, 이미 그 값이었음). `avg_4q` 코드는 삭제하지 않고 보존.
+- → 코드 변경 없음(검증 결과만 기록). `screening_criteria.md`(TODO 종료 처리) 반영 완료.
+
+### [결정] `docs_cache/`(OpenDartReader 자체 캐시) gitignore 처리
+- **배경**: 사용자가 매 세션마다 git status에 뜨던 `docs_cache/opendartreader_corp_codes_*.pkl` 삭제/추가 노이즈를 지적 — `data/cache/`는 이미 2026-09-06에 gitignore 처리됐으나(`**/data/cache/`), 이건 이 프로젝트 코드가 아니라 `OpenDartReader` 라이브러리 자체가 작업 디렉터리 기준으로 생성하는 기업코드 마스터 리스트 캐시(파일명에 날짜 포함, 개당 ~8.5MB)임을 확인. 실행 위치에 따라 `docs_cache/`(repo 루트), `stock_screener/docs_cache/`, `stock_screener/backtest/docs_cache/` 등 여러 곳에 흩어져 생기고, 그중 2개(repo 루트, `stock_screener/` 하위)가 이미 git에 추적되고 있어 매일 "어제 날짜 파일 삭제 + 오늘 날짜 파일 추가"가 diff에 잡히고 있었음.
+- **해결**: `.gitignore`에 `**/docs_cache/` 추가(data/cache와 동일한 `**/` 접두사 패턴, 깊이 무관하게 매칭). 이미 추적 중이던 2개 파일은 `git rm --cached`로 인덱스에서만 제거(로컬 파일은 보존).
+- **검증**: `git check-ignore -v`로 현재 존재하는 두 위치의 최신 캐시 파일이 새 패턴에 걸림을 확인.
+- → `.gitignore` 반영 완료.
