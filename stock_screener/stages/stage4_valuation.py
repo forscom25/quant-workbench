@@ -20,6 +20,10 @@ class ValuationScreener:
         # [수정] YAML에서 받아올 가중치 및 통과 기준
         self.pbr_weight = params.get('pbr_weight', 0.5)
         self.bps_weight = params.get('bps_growth_weight', 0.5)
+        # 2026-09-17 도입: per(pykrx 제공값, 지금까지 보존만 하고 스코어링엔 미반영)를 composite
+        # score에 반영할지 여부 A/B 검증용. 기본값 0.0(미반영, 기존 동작과 완전히 동일) — 0보다
+        # 크면 1/per(낮을수록 저평가)를 PBR과 동일한 방식으로 z-score화해 합산에 포함시킨다.
+        self.per_weight = params.get('per_weight', 0.0)
         self.pass_percentile = params.get('composite_pass_percentile', 0.3)
         self.trap_roe_threshold = params.get('value_trap_roe_threshold', 0.05)
         self.zscore_clip_lower = params.get('zscore_clip_lower', 0.01)
@@ -94,10 +98,20 @@ class ValuationScreener:
         safe_pbr = df[ValuationCols.pbr].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
         df['pbr_inv_z'] = calc_zscore(1 / safe_pbr, self.zscore_clip_lower, self.zscore_clip_upper)
         df['bps_z'] = calc_zscore(df[ValuationCols.bps_growth], self.zscore_clip_lower, self.zscore_clip_upper)
-        
+
         weights = {'pbr_inv_z': self.pbr_weight, 'bps_z': self.bps_weight}
+        drop_cols = ['pbr_inv_z', 'bps_z']
+
+        # per_weight > 0일 때만 반영(0이면 기존 동작과 완전히 동일) — PBR과 동일하게 적자 등으로
+        # per <= 0인 값은 역수 처리 시 의미 없어지므로 NaN 처리해 구제 경로로 흡수시킨다.
+        if self.per_weight > 0:
+            safe_per = df[ValuationCols.per].apply(lambda x: x if pd.notna(x) and x > 0 else np.nan)
+            df['per_inv_z'] = calc_zscore(1 / safe_per, self.zscore_clip_lower, self.zscore_clip_upper)
+            weights['per_inv_z'] = self.per_weight
+            drop_cols.append('per_inv_z')
+
         df[ValuationCols.stage4_score] = compute_composite_score(df, weights)
-        df.drop(columns=['pbr_inv_z', 'bps_z'], inplace=True)
+        df.drop(columns=drop_cols, inplace=True)
 
         # 밸류 트랩 경고 태그 (이전 단계에서 roe 컬럼이 넘어왔다고 가정)
         roe_series = df.get('roe', pd.Series(0, index=df.index))
