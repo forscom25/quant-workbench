@@ -438,6 +438,40 @@ class QuantDataLoader:
         
         return sector_group[['sector', 'return_1m', 'return_6m', 'vol_prop_1m', 'vol_prop_1y']]
 
+    def get_sector_forward_return(self, start_date: date, end_date: date) -> pd.DataFrame:
+        """
+        2026-09-15 도입: [start_date, end_date] 구간의 섹터별 시가총액가중 수익률을 반환한다.
+        Stage1 가중치(w1/w2) 튜닝을 위한 forward-return IC(정보계수) 분석 전용 — get_sector_metrics의
+        (start_date 기준 과거를 보는) return_1m/return_6m과 달리, 임의의 두 시점 사이 실제 수익률을
+        구하기 위해 신설했다. get_sector_metrics와 동일하게 `stock.get_market_price_change`(전 종목
+        일괄 조회, 티커별 루프 없음)와 시가총액가중 집계 방식을 그대로 재사용해 방법론을 통일한다.
+        """
+        from pykrx import stock
+
+        start_str = self._get_nearest_past_bday(start_date)
+        end_str = self._get_nearest_past_bday(end_date)
+
+        df = self._fetch_with_retry(
+            lambda: stock.get_market_price_change(start_str, end_str, market="KOSPI"),
+            label=f"구간 수익률({start_str}~{end_str})"
+        ).reset_index()
+        df = df[['티커', '등락률']].rename(columns={'티커': 'ticker', '등락률': 'forward_return'})
+        df['forward_return'] = df['forward_return'] / 100.0
+
+        universe = self.get_kospi_universe(start_date)
+        df = pd.merge(universe[['ticker', 'sector', 'market_cap']], df, on='ticker', how='left')
+
+        df['_w_return'] = df['forward_return'] * df['market_cap']
+        df['_w_cap'] = df['market_cap'].where(df['forward_return'].notna())
+
+        sector_group = df.groupby('sector').agg(
+            _wsum=('_w_return', 'sum'),
+            _wcap=('_w_cap', 'sum'),
+        ).reset_index()
+        sector_group['forward_return'] = sector_group['_wsum'] / sector_group['_wcap']
+
+        return sector_group[['sector', 'forward_return']]
+
     def get_financial_statements(self, ticker: str, year: int, report_code: str = '11011', fs_div: str = 'CFS') -> Optional[pd.DataFrame]:
         """재시도(Retry) 및 캐시 무효화가 적용된 DART 데이터 로더"""
         cache_file = self.cache_dir / f"dart_{ticker}_{year}_{report_code}_{fs_div}.csv"

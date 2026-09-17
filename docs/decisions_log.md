@@ -411,3 +411,22 @@
 - **해결**: `.gitignore`에 `**/docs_cache/` 추가(data/cache와 동일한 `**/` 접두사 패턴, 깊이 무관하게 매칭). 이미 추적 중이던 2개 파일은 `git rm --cached`로 인덱스에서만 제거(로컬 파일은 보존).
 - **검증**: `git check-ignore -v`로 현재 존재하는 두 위치의 최신 캐시 파일이 새 패턴에 걸림을 확인.
 - → `.gitignore` 반영 완료.
+
+## 2026-09-15 ~ 2026-09-17
+
+### [결정] Stage1 z_return/z_volume 가중치(w1/w2) forward-return IC 분석 — 신호 자체가 유의하지 않음을 확인, 0.5/0.5 유지 확정
+- **배경**: 남은 TODO 중 "1단계 가중치 튜닝"에 착수. 27개 분기 풀 백테스트를 w1/w2 그리드마다 반복하는 건 비현실적(각 2~4시간)이라, TODO 문구가 제안한 대로 "forward-return 상관관계"로 먼저 신호 자체의 예측력을 가늠하는 방향으로 사용자와 합의.
+- **설계/구현**: `data/loader.py`에 `get_sector_forward_return(start_date, end_date)` 신설 — `get_sector_metrics`와 동일한 방법론(전 종목 일괄 조회 `stock.get_market_price_change`, 시가총액가중 집계)으로 임의의 두 시점 사이 섹터별 실제 수익률을 계산. `backtest/stage1_signal_analysis.py` 신설 — 27개 분기를 순회하며 Stage1이 실제 쓰는 `return_z_score`/`volume_z_score`(NeglectedSectorScreener를 그대로 재사용해 계산 로직 드리프트 방지)와 각 섹터의 forward return을 짝지어 수집. DART 호출이 전혀 없어(pykrx만 사용) 몇 분 내로 끝나는 게 장점.
+- **사고 1: KRX IP 차단 (2026-09-15)**: 첫 실행 중 27개 분기 중 17개(63%)가 `get_index_ohlcv_by_date: Expecting value` 에러로 스킵됨. 원인 추적 결과, `import pykrx`가 **모듈 임포트 시점마다 매번 새로 KRX에 로그인**하는 구조인데, 그날 이 스크립트의 촘촘한 루프(분기당 pykrx 호출 여러 건, 딜레이 거의 없음)에 그날 있었던 수십 건의 개별 `python3 -c "..."` 테스트 호출(각각이 별도 로그인 유발)까지 누적되어 KRX Data Marketplace의 "자동화 수단을 통한 비정상 대량 조회" 탐지에 걸려 **IP가 1일간 차단**됨을 확인(KRX 로그인 응답의 raw HTML을 직접 까봐서 `.ip-block-page` 클래스의 공식 차단 안내 페이지임을 확인, 이용약관 제10조 제2호/제6조 제2항 위반 통지). DART는 별도 서비스(API 키 기반)라 영향 없음.
+- **대응**: 우회 시도 없이 자연 해제(1일)까지 대기. 2026-09-17 재개 전 단발 조회로 로그인 정상화 확인. 재발 방지로 `stage1_signal_analysis.py`의 분기별 루프에 성공/실패 양쪽 다 `time.sleep(3.0)`을 추가해 요청 패턴을 완화. 향후 pykrx를 건드리는 임시 테스트는 개별 프로세스를 여러 번 실행하기보다 하나의 스크립트/세션 안에서 묶어 실행하는 습관으로 전환(프로세스당 로그인 1회 발생 구조이므로).
+- **재실행 결과 (2026-09-17)**: 27개 분기 전부 정상 완료, 3335개 분기x섹터 표본 확보.
+
+| 분석 방법 | return_z_score | volume_z_score |
+|---|---|---|
+| 전체 풀링 Spearman IC | 0.0112 (p=0.52) | -0.0155 (p=0.37) |
+| 분기별 평균 IC(Fama-MacBeth, t-stat) | 0.0104 (t=0.37) | 0.0291 (t=0.97) |
+| 분위(quintile) Top-Bottom 스프레드 | -0.54%p | +1.20%p |
+
+- **해석**: 세 방법 모두 통계적으로 유의하지 않음(|t|<1, p>0.3). `volume_z_score`는 풀링 방식과 분기평균 방식에서 부호까지 뒤집히는데(-0.0155 vs +0.0291), 이는 측정 방식 차이라기보다 신호 자체가 노이즈 수준이라는 신호로 해석. 풀링 Spearman은 분기 간 시장 전체 수준 차이를 통제하지 못해 왜곡될 수 있어(분기마다 "forward_return"의 전체 분포 자체가 다름), 분기별 IC를 먼저 구하고 그 시계열을 평균하는 Fama-MacBeth 방식이 방법론적으로 더 타당하다고 판단 — 다만 그마저도 유의하지 않음.
+- **최종 결정**: 이 데이터로 `stage1_return_weight`/`stage1_volume_weight`를 0.5/0.5에서 바꿀 실증적 근거가 없다고 판단, 기본값 유지 확정. 사용자가 이를 "약한 개별 모델을 여러 개 결합해 좋은 모델을 만드는 앙상블 기법"에 비유 — Stage1의 두 신호가 개별로는 약해도(혹은 무의미해도), architecture.md에 이미 명시된 대로 Stage1의 본래 역할이 "넓은 1차 필터 + DART 호출량 절감용 계산비용 관문"이지 강한 단독 알파 신호일 필요가 없고, 실제 전체 파이프라인(Stage1~5 결합)은 이미 27분기 백테스트로 누적 54.3%·양의 Sharpe라는 실질 성과가 검증된 상태라는 점에서 합리적인 결론으로 채택.
+- → `data/loader.py`(`get_sector_forward_return` 신규), `backtest/stage1_signal_analysis.py`(신규) 반영 완료. `screening_criteria.md`(TODO 종료 처리) 반영 완료.
