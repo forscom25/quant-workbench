@@ -57,7 +57,7 @@ stage3_fundamental_improve:
 stage4_valuation:
   pbr_weight: 0.2                    # PBR(역수) Z-score 가중치
   bps_growth_weight: 0.8             # BPS 성장률 Z-score 가중치
-  per_weight: 0.0                    # PER(역수) Z-score 가중치 — 0.0(기본값)이면 기존 동작과 동일(미반영), 백테스트 검증 전(TODO)
+  per_weight: 0.0                    # PER(역수) Z-score 가중치 — 2026-09-17 A/B 검증 결과 반영 시 성과 악화 확인, 0.0(미반영) 최종 확정
   composite_pass_percentile: 0.3     # 합산 점수 상위 30% 통과
   value_trap_roe_threshold: 0.05     # 밸류트랩 경고 태그용 ROE 임계치 (5% 미만 시 태그)
   zscore_clip_lower: 0.01            # Z-score 산출 전 극단값 클리핑 하한 분위
