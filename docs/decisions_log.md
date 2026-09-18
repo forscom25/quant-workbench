@@ -493,3 +493,10 @@
 - **유일한 예외**: `[이익질주의]`(OCF가 순이익보다 적음 — 회계상 이익은 있으나 현금이 안 들어옴)만 가설과 일치하는 방향(-3.36%p)이고 통상적 유의수준(0.05)에 가까운 p=0.068을 보임. 표본이 상대적으로 작아(flagged n=168) 확정적이진 않으나, 5개 중 유일하게 실제 게이트 전환을 검토할 가치가 있는 후보.
 - **다음 단계**: `[이익질주의]`를 Stage5의 실제 배제 게이트로 전환해 27개 분기 전체 A/B 백테스트로 재검증하는 것을 TODO로 이관(오늘 세션은 여기서 종료, 사용자 요청으로 마무리).
 - → `backtest/warning_tag_gate_analysis.py`(신규) 반영 완료. 코드/설정 변경 없음(분석 결과만 기록). `screening_criteria.md`(TODO 갱신) 반영 완료.
+
+### [결정] 데스크탑 2014~2018 out-of-sample 검증 준비 — 분석 스크립트에 `--start`/`--end` CLI 지원 추가
+- **배경**: 사용자가 지금까지의 2019~2025 기준 결론들(annual/avg_4q/per_weight 열세, warning_tags 4/5 부적합 등)이 이 구간에 과적합된 것 아니냐는 우려를 제기 — 타당한 지적으로 판단(자세한 논의는 대화 맥락 참고, 이 항목은 그 실행 준비만 기록). 데스크탑에서 2014~2018을 돌려 재현되는지 확인하기로 함. 데스크탑이 바로 `git pull` 후 시작할 수 있도록 준비 착수.
+- **발견**: `backtest/cache_warmup.py`와 이번 세션에 만든 세 분석 스크립트(`stage1_signal_analysis.py`, `stage4_signal_analysis.py`, `warning_tag_gate_analysis.py`)가 전부 `config/params.yaml`의 `backtest.start_year`/`end_year`만 읽고 CLI 오버라이드를 지원하지 않았음 — `run_backtest.py`만 `--start`/`--end`를 지원하는 상태(2026-09-06 확정). 이 상태로는 데스크탑에서 기간을 바꿀 때마다 `params.yaml`을 고쳤다 되돌리는 수작업이 필요해, 이번 세션 내내 해온 "임시로 바꾸고 즉시 원복" 패턴을 다른 기기·다른 세션에서도 반복해야 하는 번거로움과 실수 위험이 있었음.
+- **해결**: 네 스크립트 전부에 `run_backtest.py`와 동일한 패턴(`--start`/`--end` 인자, 미지정 시 `params.yaml` 폴백)을 추가. `--help` 출력으로 4개 스크립트 전부 정상 동작 확인.
+- **문서화**: `screening_criteria.md` TODO에 데스크탑 실행 절차를 구체적으로 기록(별도 DART_API_KEY 권장, 소규모 파일럿 먼저, `cache_warmup.py`→`run_backtest.py`→3개 신호 분석 순서, `params.yaml`은 두 기기에서 동일하게 유지하고 기간만 CLI로 다르게 하는 원칙).
+- → `backtest/cache_warmup.py`, `backtest/stage1_signal_analysis.py`, `backtest/stage4_signal_analysis.py`, `backtest/warning_tag_gate_analysis.py`(전부 `--start`/`--end` 추가) 반영 완료. `screening_criteria.md`(데스크탑 검증 절차 TODO 신설) 반영 완료.

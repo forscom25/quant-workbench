@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import yaml
 import itertools
 import pandas as pd
@@ -36,11 +37,11 @@ def resolve_target_tickers(pipeline: QuantPipeline, base_dates: list[date]) -> s
     print(f"✅ [1/2] 타겟 종목 추출 완료: 총 {len(target_tickers)}개 종목이 후보군으로 선정되었습니다.\n")
     return target_tickers
 
-def warm_up_dart_cache():
+def warm_up_dart_cache(start_year_override: int = None, end_year_override: int = None):
     print("==================================================")
     print("🔥 DART 재무 데이터 스마트 캐시 예열 (Warm-up) 시작")
     print("==================================================\n")
-    
+
     # 1. 설정 및 인스턴스 초기화
     config_path = PROJECT_ROOT / "config" / "params.yaml"
     try:
@@ -49,16 +50,17 @@ def warm_up_dart_cache():
     except FileNotFoundError:
         print(f"❌ 설정 파일을 찾을 수 없습니다: {config_path}")
         return
-        
+
     ttm_denominator = params.get('global', {}).get('ttm_denominator', 'latest_snapshot')
     loader = QuantDataLoader(use_cache=True, ttm_denominator=ttm_denominator)
     pipeline = QuantPipeline(params, loader)
 
-    # run_backtest.py와 동일한 단일 출처(params.yaml backtest.start_year/end_year)에서 기간을 가져옴 —
-    # 여기서만 따로 하드코딩하면 백테스트 기간을 바꿀 때 캐시 예열 범위와 어긋날 위험이 있었음.
+    # run_backtest.py와 동일한 단일 출처(params.yaml backtest.start_year/end_year)에서 기간을 가져오되,
+    # CLI --start/--end가 있으면 그걸 우선한다(2026-09-18 추가 — 다른 기간을 검증할 때마다 params.yaml을
+    # 고쳤다 되돌리는 수작업 없이 바로 실행할 수 있도록, run_backtest.py와 동일한 패턴으로 통일).
     backtest_params = params.get('backtest', {})
-    start_year = backtest_params.get('start_year', 2019)
-    end_year = backtest_params.get('end_year', 2025)
+    start_year = start_year_override if start_year_override is not None else backtest_params.get('start_year', 2019)
+    end_year = end_year_override if end_year_override is not None else backtest_params.get('end_year', 2025)
 
     # 2. 백테스트와 동일하게 KOSPI 영업일 기반으로 생성
     base_dates = loader.get_quarterly_rebalance_dates(start_year, end_year)
@@ -116,4 +118,8 @@ def warm_up_dart_cache():
     print("💡 내일 다시 실행하면 멈춘 곳부터 API 호출 없이 빠르게 건너뛴 후 이어서 수집합니다.")
 
 if __name__ == "__main__":
-    warm_up_dart_cache()
+    parser = argparse.ArgumentParser(description="DART 캐시 스마트 예열")
+    parser.add_argument("--start", type=int, default=None, help="예열 시작 연도 (기본: params.yaml backtest.start_year)")
+    parser.add_argument("--end", type=int, default=None, help="예열 종료 연도 (기본: params.yaml backtest.end_year)")
+    args = parser.parse_args()
+    warm_up_dart_cache(start_year_override=args.start, end_year_override=args.end)

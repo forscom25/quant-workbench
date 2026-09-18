@@ -82,5 +82,5 @@ backtest:
   fee_rate: 0.00015          # 편도 거래 수수료율
   slippage: 0.002            # 편도 슬리피지 가정치
   min_portfolio_size: 5      # 통과 종목이 이 수 미만이면 집중 리스크 회피를 위해 해당 분기 거래를 스킵(현금 처리)
-  start_year: 2019           # 백테스트 시작 연도 — run_backtest.py --start, cache_warmup.py 공통 출처
-  end_year: 2025             # 백테스트 종료 연도 — run_backtest.py --end, cache_warmup.py 공통 출처
+  start_year: 2019           # 백테스트 시작 연도 — 미지정 폴백값. run_backtest.py/cache_warmup.py/stage1_signal_analysis.py/stage4_signal_analysis.py/warning_tag_gate_analysis.py 전부 --start로 오버라이드 가능(2026-09-18)
+  end_year: 2025             # 백테스트 종료 연도 — 미지정 폴백값. 위와 동일하게 전부 --end로 오버라이드 가능

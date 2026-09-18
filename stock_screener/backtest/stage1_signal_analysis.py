@@ -8,9 +8,11 @@ w1/w2 조합마다 27분기 풀 백테스트(각 2~4시간)를 반복하는 건 
 
 사용 예:
     python3 backtest/stage1_signal_analysis.py
+    python3 backtest/stage1_signal_analysis.py --start 2014 --end 2018   # 다른 기간(out-of-sample) 검증
 """
 import sys
 import time
+import argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -26,6 +28,11 @@ from stages.stage1_neglected_sector import NeglectedSectorScreener
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Stage1 신호 IC 분석")
+    parser.add_argument("--start", type=int, default=None, help="시작 연도 (기본: params.yaml backtest.start_year)")
+    parser.add_argument("--end", type=int, default=None, help="종료 연도 (기본: params.yaml backtest.end_year)")
+    args = parser.parse_args()
+
     print("=" * 50)
     print("Stage1 신호 IC(정보계수) 분석 — return_z_score / volume_z_score")
     print("=" * 50)
@@ -34,8 +41,8 @@ def main():
         params = yaml.safe_load(f)
 
     backtest_params = params.get("backtest", {})
-    start_year = backtest_params.get("start_year", 2019)
-    end_year = backtest_params.get("end_year", 2025)
+    start_year = args.start if args.start is not None else backtest_params.get("start_year", 2019)
+    end_year = args.end if args.end is not None else backtest_params.get("end_year", 2025)
 
     loader = QuantDataLoader(use_cache=True)
     base_dates = loader.get_quarterly_rebalance_dates(start_year, end_year)
