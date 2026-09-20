@@ -1,8 +1,10 @@
+import io
 import os
 import json
 import time
 import logging
 import requests
+from urllib.error import HTTPError
 from dotenv import load_dotenv
 
 # pykrx는 모듈 임포트 시점에 KRX 인증 세션을 생성하므로(website/comm/webio.py 참고),
@@ -15,7 +17,7 @@ import numpy as np
 from pykrx import stock
 import FinanceDataReader as fdr
 import OpenDartReader
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict
 import warnings
@@ -94,6 +96,8 @@ class QuantDataLoader:
         if self.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
+        # _get_sector_listing()의 폴백 결과 (날짜 무관한 "현재 업종 분류"라 인스턴스 내 재사용)
+        self._sector_listing_fallback: Optional[pd.DataFrame] = None
 
         # endpoints.json 로드 (Rate Limit 및 설정)
         # [수정 4] 상대 경로 취약점 해결 -> 절대 경로 기반 로드
@@ -123,7 +127,7 @@ class QuantDataLoader:
         _patch_requests_default_timeout(max(dart_timeout, krx_timeout))
 
         # config 로드 블록 하단에 추가 (DART API 일일 호출량 관리)
-        self.dart_daily_limit = self.endpoints.get("DART", {}).get("daily_limit", 9500)
+        self.dart_daily_limit = self.endpoints.get("DART", {}).get("daily_limit", 19000)  # OpenDART 기본 한도 20,000건 기준 5% 안전 마진
         # 🚨 [수정] dart_call_count를 프로세스 메모리에만 두면 재시작할 때마다 0으로 리셋되어,
         # 같은 날 여러 번 실행(크래시 후 재시도 등)할 경우 로컬 카운터는 계속 여유가 있다고
         # 착각하지만 DART 서버 쪽 실제 일일 한도는 프로세스와 무관하게 계속 누적되는 문제가
@@ -300,6 +304,42 @@ class QuantDataLoader:
         # 만약 API 실패 등의 이유로 조회하지 못했다면 원래 날짜를 그대로 반환 (최후의 보루)
         return target_date.strftime("%Y%m%d")
 
+    # FinanceDataReader가 'KRX-DESC' 조회에 쓰는 GitHub 미러 (krx/listing.py 참고)
+    _FDR_LISTING_MIRROR = 'https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/refs/heads/master/data/listing/desc/'
+    _SECTOR_LISTING_FALLBACK_DAYS = 14
+
+    def _get_sector_listing(self) -> pd.DataFrame:
+        """
+        종목별 업종 분류(Code, Industry)를 반환합니다. 기본은 fdr.StockListing('KRX-DESC').
+
+        2026-09-19 폴백 추가: FDR은 KRX가 알려주는 최신 영업일 이름의 CSV를 GitHub 미러에서 읽는데,
+        미러 갱신이 하루 이틀 밀리면 그 파일이 없어 HTTP 404가 나고 유니버스 조회 전체가 죽는다
+        (이 때문에 cache_warmup.py Stage 1이 12개 분기 전부 실패한 사례가 있음). 404일 때만
+        오늘부터 하루씩 과거로 물러나며 가장 최근 파일을 직접 읽는다. 어차피 업종은 base_date와
+        무관한 "현재 분류"라(get_kospi_universe docstring의 알려진 한계 참고) 며칠 전 분류를 써도
+        결과에 실질적 영향이 없다.
+        """
+        if self._sector_listing_fallback is not None:
+            return self._sector_listing_fallback.copy()
+        try:
+            return fdr.StockListing('KRX-DESC')[['Code', 'Industry']]
+        except HTTPError as e:
+            if e.code != 404:
+                raise
+            self.logger.warning(f"[업종 목록 404] FDR 미러에 최신 파일이 없어 이전 날짜로 폴백합니다: {e}")
+
+        for offset in range(self._SECTOR_LISTING_FALLBACK_DAYS):
+            candidate = date.today() - timedelta(days=offset)
+            resp = requests.get(f"{self._FDR_LISTING_MIRROR}{candidate.isoformat()}.csv", timeout=15)
+            if resp.status_code == 404:
+                continue
+            resp.raise_for_status()
+            df = pd.read_csv(io.BytesIO(resp.content), index_col=0, dtype={'Code': str})
+            self.logger.warning(f"[업종 목록 폴백] {candidate} 파일로 대체")
+            self._sector_listing_fallback = df[['Code', 'Industry']]
+            return self._sector_listing_fallback.copy()
+        raise ValueError(f"FDR 미러에서 최근 {self._SECTOR_LISTING_FALLBACK_DAYS}일 내 업종 목록 파일을 찾지 못했습니다.")
+
     def get_kospi_universe(self, base_date: date) -> pd.DataFrame:
         """
         [미래 정보 참조 방지 및 하이브리드 매핑 적용]
@@ -340,7 +380,7 @@ class QuantDataLoader:
         
         # ⚠️ 날짜 인자 없음 — base_date와 무관하게 항상 "현재" 업종 분류를 반환함.
         # point-in-time이 아니라는 한계를 이 함수 docstring에 명시함 (알려진 한계 참고).
-        fdr_df = fdr.StockListing('KRX-DESC')[['Code', 'Industry']]
+        fdr_df = self._get_sector_listing()
         fdr_df.columns = ['ticker', 'sector']
         
         df = pd.merge(df, fdr_df, on='ticker', how='left')

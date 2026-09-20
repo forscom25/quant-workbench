@@ -95,7 +95,7 @@ def warm_up_dart_cache(start_year_override: int = None, end_year_override: int =
             except RuntimeError as e:
                 # DART API 일일 한도 초과 감지
                 if "한도" in str(e) or "limit" in str(e).lower():
-                    print(f"\n🚨 [일일 호출량 초과] {year}년 {rc} 보고서 수집 중 DART 한도(10,000건) 도달.")
+                    print(f"\n🚨 [일일 호출량 초과] {year}년 {rc} 보고서 수집 중 DART 한도({loader.dart_daily_limit:,}건) 도달.")
                     break
                 else:
                     error_count += 1
