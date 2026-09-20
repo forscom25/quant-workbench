@@ -30,6 +30,7 @@ from dateutil.relativedelta import relativedelta
 from core.schema import Stage
 from core.pipeline import QuantPipeline
 from core.metrics_utils import calc_zscore
+from backtest.analysis_guard import QuarterErrorGuard, append_partial
 from data.loader import QuantDataLoader
 
 
@@ -102,6 +103,15 @@ def main():
     pipeline = QuantPipeline(params, loader)
     base_dates = loader.get_quarterly_rebalance_dates(start_year, end_year)
 
+    out_dir = PROJECT_ROOT / "outputs"
+    out_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = out_dir / f"stage4_ic_analysis_{timestamp}.csv"
+    # 2026-09-20: 분기마다 원자료를 .partial.csv에 이어쓰고, 연속 3분기 실패 시 즉시 중단(KRX 차단 시 조용히
+    # 부분 표본으로 끝나던 문제 방지 — backtest/analysis_guard.py 참고)
+    partial_path = out_dir / f"stage4_ic_analysis_{timestamp}.partial.csv"
+    guard = QuarterErrorGuard(partial_hint=f"그때까지 수집분: {partial_path}")
+
     records = []
     for i in range(len(base_dates) - 1):
         t_date, t_next = base_dates[i], base_dates[i + 1]
@@ -109,26 +119,31 @@ def main():
         try:
             stage3_survivors, _ = pipeline.run(t_date, stop_after=Stage.STAGE3)
             if stage3_survivors.empty:
+                # 이 시기엔 DART 이력이 부족해 정상적으로 후보가 없을 수 있음(2016년 등) — 오류가 아님
                 print("  ⚠️ Stage3 통과 종목 없음, 건너뜀")
+                guard.ok()
                 continue
             factors = compute_stage4_factors(stage3_survivors, loader, t_date, zscore_clip_lower, zscore_clip_upper)
             if factors.empty:
-                print("  ⚠️ 밸류에이션 원자료 없음, 건너뜀")
-                continue
+                # KRX 펀더멘털이 비어 오는 건 차단/장애의 증상이라 오류로 취급(except에서 guard에 집계)
+                raise ValueError("밸류에이션 원자료 없음")
             fwd = get_ticker_forward_return(loader, factors['ticker'].tolist(), t_date, t_next)
         except Exception as e:
             print(f"  ⚠️ 건너뜀(에러): {e}")
+            guard.fail(t_date, e)
             time.sleep(3.0)
             continue
+        guard.ok()
 
         merged = pd.merge(factors, fwd, on='ticker', how='inner')
         merged['base_date'] = t_date
         records.append(merged)
+        append_partial(partial_path, merged)
         time.sleep(1.0)
 
     if not records:
         print("❌ 수집된 데이터가 없습니다.")
-        return
+        return 1
 
     all_df = pd.concat(records, ignore_index=True)
     print(f"\n표본 수(분기x종목, Stage3 통과분): {len(all_df)}")
@@ -148,13 +163,10 @@ def main():
 
         print(f"{col}: n={len(sub)}, 풀링 IC={pooled_ic:.4f} | 분기평균 IC={mean_ic:.4f}, t-stat={t_stat:.2f} ({len(by_q)}분기)")
 
-    out_dir = PROJECT_ROOT / "outputs"
-    out_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"stage4_ic_analysis_{timestamp}.csv"
     all_df.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"\n원자료 저장: {out_path}")
+    return guard.report(len(base_dates) - 1)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

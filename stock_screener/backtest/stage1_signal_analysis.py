@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import yaml
 import pandas as pd
 
+from backtest.analysis_guard import QuarterErrorGuard, append_partial
 from data.loader import QuantDataLoader
 from stages.stage1_neglected_sector import NeglectedSectorScreener
 
@@ -55,6 +56,15 @@ def main():
         "stage1_pass_ratio": 1.0,
     })
 
+    out_dir = PROJECT_ROOT / "outputs"
+    out_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = out_dir / f"stage1_ic_analysis_{timestamp}.csv"
+    # 2026-09-20: 분기마다 원자료를 .partial.csv에 이어쓰고, 연속 3분기 실패 시 즉시 중단(KRX 차단 시 조용히
+    # 부분 표본으로 끝나던 문제 방지 — backtest/analysis_guard.py 참고)
+    partial_path = out_dir / f"stage1_ic_analysis_{timestamp}.partial.csv"
+    guard = QuarterErrorGuard(partial_hint=f"그때까지 수집분: {partial_path}")
+
     records = []
     for i in range(len(base_dates) - 1):
         t_date, t_next = base_dates[i], base_dates[i + 1]
@@ -65,8 +75,10 @@ def main():
             fwd = loader.get_sector_forward_return(t_date, t_next)
         except Exception as e:
             print(f"  ⚠️ 건너뜀(에러): {e}")
+            guard.fail(t_date, e)
             time.sleep(3.0)
             continue
+        guard.ok()
 
         merged = pd.merge(
             scored[["sector", "return_z_score", "volume_z_score"]],
@@ -74,6 +86,7 @@ def main():
         )
         merged["base_date"] = t_date
         records.append(merged)
+        append_partial(partial_path, merged)
 
         # 2026-09-17 추가: KRX가 "자동화 수단을 통한 비정상 대량 조회"를 탐지해 IP를 1일간
         # 차단한 사고가 있었음(이 스크립트의 촘촘한 루프 + 그날의 다른 개별 테스트 호출들이
@@ -82,7 +95,7 @@ def main():
 
     if not records:
         print("❌ 수집된 데이터가 없습니다.")
-        return
+        return 1
 
     all_df = pd.concat(records, ignore_index=True)
     all_df = all_df.dropna(subset=["return_z_score", "volume_z_score", "forward_return"])
@@ -97,13 +110,10 @@ def main():
     print(f"volume_z_score IC (Spearman): {ic_volume:.4f}")
     print("=" * 50)
 
-    out_dir = PROJECT_ROOT / "outputs"
-    out_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"stage1_ic_analysis_{timestamp}.csv"
     all_df.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"원자료 저장: {out_path}")
+    return guard.report(len(base_dates) - 1)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

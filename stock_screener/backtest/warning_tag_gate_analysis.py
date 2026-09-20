@@ -33,6 +33,7 @@ from scipy import stats as scipy_stats
 
 from core.schema import Stage
 from core.pipeline import QuantPipeline
+from backtest.analysis_guard import QuarterErrorGuard, append_partial
 from data.loader import QuantDataLoader
 
 
@@ -74,18 +75,27 @@ def main():
     # (태그가 계산되는 stage, 태그 판정 방식) — 각 태그는 해당 stage의 "입력 후보군 전체"에서 계산됨
     records = {'stage3_cost_cutting': [], 'stage4_pbr_trap': [], 'stage5_icr': [], 'stage5_profit_quality': [], 'stage5_debt': []}
 
+    out_dir = PROJECT_ROOT / "outputs"
+    out_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 2026-09-20: 분기마다 원자료를 태그별 .partial.csv에 이어쓰고, 연속 3분기 실패 시 즉시 중단(KRX 차단 시
+    # 조용히 부분 표본으로 끝나던 문제 방지 — backtest/analysis_guard.py 참고)
+    guard = QuarterErrorGuard(partial_hint=f"그때까지 수집분: {out_dir}/warning_tag_*_{timestamp}.partial.csv")
+
     for i in range(len(base_dates) - 1):
         t_date, t_next = base_dates[i], base_dates[i + 1]
         print(f"[{i + 1}/{len(base_dates) - 1}] {t_date} -> {t_next}")
         try:
             stage1_survivors, _ = pipeline.run(t_date, stop_after=Stage.STAGE1)
             if stage1_survivors.empty:
+                guard.ok()
                 continue
 
             stage2_raw = pipeline.stage2.run(stage1_survivors, loader, t_date)
             stage2_acc = pipeline._accumulate_results(stage1_survivors, stage2_raw)
             stage2_survivors = pipeline._filter_passed(stage2_acc)
             if stage2_survivors.empty:
+                guard.ok()
                 continue
 
             stage3_raw = pipeline.stage3.run(stage2_survivors, loader, t_date)
@@ -106,6 +116,7 @@ def main():
                 stage5_acc = pipeline._accumulate_results(stage4_survivors, stage5_raw)
         except Exception as e:
             print(f"  ⚠️ 건너뜀(에러): {e}")
+            guard.fail(t_date, e)
             time.sleep(3.0)
             continue
 
@@ -115,8 +126,16 @@ def main():
             if not acc.empty:
                 all_tickers.update(acc['ticker'].tolist())
         if not all_tickers:
+            guard.ok()
             continue
-        fwd = get_ticker_forward_return(loader, list(all_tickers), t_date, t_next)
+        try:
+            fwd = get_ticker_forward_return(loader, list(all_tickers), t_date, t_next)
+        except Exception as e:
+            print(f"  ⚠️ 건너뜀(에러, forward return 조회): {e}")
+            guard.fail(t_date, e)
+            time.sleep(3.0)
+            continue
+        guard.ok()
         fwd_map = fwd.set_index('ticker')['forward_return']
 
         def collect(acc_df, tag_col, is_flagged_fn, key):
@@ -128,7 +147,9 @@ def main():
             sub = sub.dropna(subset=['forward_return'])
             sub['base_date'] = t_date
             if not sub.empty:
-                records[key].append(sub[['ticker', 'flagged', 'forward_return', 'base_date']])
+                chunk = sub[['ticker', 'flagged', 'forward_return', 'base_date']]
+                records[key].append(chunk)
+                append_partial(out_dir / f"warning_tag_{key}_{timestamp}.partial.csv", chunk)
 
         collect(stage3_acc, 'is_cost_cutting_warning', lambda x: bool(x), 'stage3_cost_cutting')
         collect(stage4_acc, 'is_pbr_value_trap', lambda x: bool(x), 'stage4_pbr_trap')
@@ -141,10 +162,6 @@ def main():
     print("\n" + "=" * 50)
     print("결과: 태그별 flagged vs unflagged forward return 비교")
     print("=" * 50)
-
-    out_dir = PROJECT_ROOT / "outputs"
-    out_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     for key, chunks in records.items():
         if not chunks:
@@ -164,7 +181,8 @@ def main():
         df.to_csv(out_dir / f"warning_tag_{key}_{timestamp}.csv", index=False, encoding="utf-8-sig")
 
     print(f"\n원자료 저장 위치: {out_dir}")
+    return guard.report(len(base_dates) - 1)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
