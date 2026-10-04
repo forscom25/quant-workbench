@@ -25,13 +25,17 @@ stock_screener/
 │   └── metrics_utils.py    # 재사용 가능한 순수 통계 함수 (Z-score, 합산 등)
 ├── backtest/
 │   └── forward_return.py   # 각 단계별 신호 검증 및 포트폴리오 시뮬레이션
-│   └── cache_warmup.py     # 백테스트 전용 DART API 스마트 캐시 예열 스크립트
+│   ├── cache_warmup.py     # 백테스트 전용 DART API 스마트 캐시 예열 스크립트
+│   └── stage_pass_analysis.py  # 단계별 통과/탈락 + 다음 분기 수익률 원자료 수집 (KRX 순차 호출, 2026-10-04)
 ├── analysis/               # [조회-읽기] 파이프라인/백테스트 산출물 분석 및 렌더링 (CQS 패턴)
 │   ├── stats.py                # 순수 계산: Sharpe, MDD, 승률, 누적 수익률 등 (백테스트용)
 │   ├── visualize.py            # stats.py 결과를 차트로 렌더링 (백테스트용)
 │   ├── screening_stats.py      # 순수 계산: 단계별 깔때기 요약, 티커별 탈락사유 리포트 (실전 스크리닝용)
-│   └── visualize_screening.py  # screening_stats.py 결과를 차트/CSV로 렌더링 (실전 스크리닝용)
+│   ├── visualize_screening.py  # screening_stats.py 결과를 차트/CSV로 렌더링 (실전 스크리닝용)
+│   ├── candidate_report.py     # 순수 계산: 후보 순위/shortlist(섹터당 1종목), 보유 종목 점검 (2026-10-04)
+│   └── stage_pass_stats.py     # 조회 전용: 단계별 기여·무작위 대조군 통계 (stage_pass_analysis.py 결과를 읽음)
 ├── outputs/                # 파생 산출물 저장 (Git 추적 제외)
+├── private/                # 개인 자산/보유 종목(holdings.yaml, portfolio.md) — Git 제외(**/private/)
 ├── scripts/
 │   └── clean_cache.py      # 비영업일 기준으로 어긋난 캐시 파일 정리 유틸리티
 ├── debugging/               # 임시 조사·재현용 스크립트 모음 (2026-09-10, 예전 주피터 노트북 3개를 대체)

@@ -306,7 +306,7 @@ class QuantDataLoader:
 
     # FinanceDataReader가 'KRX-DESC' 조회에 쓰는 GitHub 미러 (krx/listing.py 참고)
     _FDR_LISTING_MIRROR = 'https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/refs/heads/master/data/listing/desc/'
-    _SECTOR_LISTING_FALLBACK_DAYS = 14
+    _SECTOR_LISTING_FALLBACK_DAYS = 45  # 2026-10-04: 미러 갱신이 17일 멈춰 14일 한도로는 실패해 확대
 
     def _get_sector_listing(self) -> pd.DataFrame:
         """

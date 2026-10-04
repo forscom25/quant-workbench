@@ -37,3 +37,5 @@ __pycache__/
 
 # 백테스트 결과 및 차트 산출물 (Git 추적 제외)
 outputs/
+# 개인 자산/보유 종목 정보 (GitHub에 올라가면 안 됨)
+**/private/
