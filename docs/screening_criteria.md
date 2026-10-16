@@ -120,7 +120,7 @@
 - PBR의 상대적 매력도와 BPS 훼손 여부를 합산 점수로 평가하여 유연성 확보.
 - PBR이 0 이하(자본잠식)인 데이터는 Z-score 정규화 과정에서 클리핑(Clipping) 및 역수 처리 문제를 일으키므로, 결측치(`NaN`)로 치환하여 `EXEMPT` 처리 후 5단계로 넘김.
 
-**스키마 매핑**: `ValuationMetrics` (`pbr`, `per`, `psr`, `bps_growth`, `stage4_score`, `is_pbr_value_trap`) — 필드명은 `bps_growth`(과거 `bps_growth_yoy`에서 변경). `per`/`psr` 둘 다 값만 보존하며 아직 composite score 계산에는 포함되지 않는다(참고용/향후 확장 필드, 반영 여부는 [TODO](#미정-사항-todo) 참고). `per`는 pykrx 응답에서 함께 실려오는 값을 그대로 쓰고, `psr`(시가총액/TTM매출)은 2026-09-11 도입 — TTM 매출은 pykrx에 없어 `loader.get_ttm_financials()`로 DART 원본을 직접 조회해 계산한다(같은 후보들에 대해 Stage3가 이미 같은 재무제표를 조회해둬 캐시가 예열되어 있는 경우가 대부분이라 신규 DART 호출 비용은 거의 없음).
+**스키마 매핑**: `ValuationMetrics` (`pbr`, `per`, `psr`, `bps_growth`, `stage4_score`, `is_pbr_value_trap`, `pbr_universe_pct`) — 필드명은 `bps_growth`(과거 `bps_growth_yoy`에서 변경). `per`/`psr` 둘 다 값만 보존하며 아직 composite score 계산에는 포함되지 않는다(참고용/향후 확장 필드, 반영 여부는 [TODO](#미정-사항-todo) 참고). `per`는 pykrx 응답에서 함께 실려오는 값을 그대로 쓰고, `psr`(시가총액/TTM매출)은 2026-09-11 도입 — TTM 매출은 pykrx에 없어 `loader.get_ttm_financials()`로 DART 원본을 직접 조회해 계산한다(같은 후보들에 대해 Stage3가 이미 같은 재무제표를 조회해둬 캐시가 예열되어 있는 경우가 대부분이라 신규 DART 호출 비용은 거의 없음). `pbr_universe_pct`(2026-10-16)는 KOSPI 전 종목(PBR>0) 중 PBR 백분위(0=가장 저PBR)로, 판정·점수에 쓰지 않는 참고 정보다(후보 리포트에 표시).
 
 **데이터 소스**: `pbr`/`bps`/`per`는 DART 계정을 조합해 직접 계산하지 않고 `pykrx.stock.get_market_fundamental()`의 point-in-time 기시산출값을 그대로 사용한다 (발행주식수 별도 조회 불필요).  근거는 [`architecture.md`](./architecture.md#밸류에이션-원자료는-pykrx-기시산출값-사용) 참고. 
 

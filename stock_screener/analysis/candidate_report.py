@@ -9,7 +9,7 @@ SCORE_COLS = ['stage3_score', 'stage4_score', 'stage5_score']
 
 # 리포트에 보여줄 핵심 지표. history에 없는 컬럼은 건너뛴다(실행 시점/설정에 따라 달라질 수 있음).
 DETAIL_COLS = ['name', 'sector', 'market_cap', 'roe', 'roic', 'op_margin_std',
-               'sales_growth_yoy', 'pbr', 'per', 'psr', 'bps_growth',
+               'sales_growth_yoy', 'pbr', 'pbr_universe_pct', 'per', 'psr', 'bps_growth',
                'debt_ratio', 'interest_coverage_ratio']
 FLAG_COLS = ['is_cost_cutting_warning', 'is_pbr_value_trap', 'warning_tags', 'na_reasons']
 

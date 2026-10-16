@@ -82,6 +82,10 @@ class ValuationMetrics:
     # TODO 참고). per(pykrx 제공값)과 달리 DART TTM 매출을 loader.get_ttm_financials()로
     # 직접 조회해 계산한다.
     psr: Optional[float] = None
+    # 2026-10-16 도입: KOSPI 전 종목(PBR>0) 중 PBR 백분위(0=가장 저PBR). 판정·점수에는 쓰지 않는
+    # 참고 정보 — 단순 팩터 기준선에서 저PBR만 IC가 두 구간 모두 유의했고 파이프라인 최종 통과는
+    # 저PBR 노출이 없어서(백분위 중앙값 0.50), 사람이 후보를 고를 때 보도록 노출한다.
+    pbr_universe_pct: Optional[float] = None
 
 @dataclass
 class FinancialHealthMetrics:

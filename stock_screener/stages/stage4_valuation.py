@@ -91,6 +91,16 @@ class ValuationScreener:
         )
         df.drop(columns=['_ttm_revenue'], inplace=True)
 
+        # 2-2. KOSPI 전 종목 기준 PBR 백분위(참고 정보, 판정 미반영). 후보군(Stage3 통과) 내부 순위가
+        # 아니라 시장 전체에서 얼마나 싼지를 보여야 기준선 결과(2026-10-16)와 같은 잣대가 된다.
+        # 시총 하한(1,000억) 유니버스 기준과의 차이는 최대 0.07로 확인돼 전 종목 기준을 쓴다.
+        if not fund_t0.empty and ValuationCols.pbr in fund_t0.columns:
+            mkt_pbr = fund_t0.drop_duplicates('ticker').set_index('ticker')[ValuationCols.pbr]
+            mkt_pct = mkt_pbr.where(mkt_pbr > 0).rank(pct=True)
+            df[ValuationCols.pbr_universe_pct] = df['ticker'].map(mkt_pct)
+        else:
+            df[ValuationCols.pbr_universe_pct] = np.nan
+
         # ---------------------------------------------------------
         # 3. Composite Score 스코어링 및 필터링
         # ---------------------------------------------------------
